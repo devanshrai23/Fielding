@@ -1,0 +1,69 @@
+# Configuration file of FAR training experiment
+
+# ========== Cluster configuration ========== 
+# ip address of the parameter server (need 1 GPU process)
+ps_ip: localhost
+
+# ip address of each worker:# of available gpus process on each gpu in this node
+# Note that if we collocate ps and worker on same GPU, then we need to decrease this number of available processes on that GPU by 1
+# E.g., master node has 4 available processes, then 1 for the ps, and worker should be set to: worker:3
+worker_ips:
+    - localhost:[4]
+
+exp_path: $FEDSCALE_HOME/fedscale/cloud
+
+# Entry function of executor and aggregator under $exp_path
+executor_entry: execution/executor.py
+
+aggregator_entry: aggregation/aggregator.py
+
+auth:
+    ssh_user: ""
+    ssh_private_key: ~/.ssh/id_ed25519
+
+setup_commands:
+    - source $HOME/miniconda3/bin/activate fedscale
+
+# ========== Additional job configuration ========== 
+# Default parameters are specified in config_parser.py, wherein more description of the parameter can be found
+
+job_conf: 
+    - job_name: cityscape                   # Generate logs under this folder: log_path/job_name/time_stamp
+    - log_path: $FEDSCALE_HOME/benchmark/logs/cityscape
+    - num_participants: 20
+    - data_set: cityscape                     # Dataset: e.g., openImg, google_speech, stackoverflow
+    - data_dir: $FEDSCALE_HOME/benchmark/dataset/data/cityscape    # Path of the dataset
+    - data_map_file: $FEDSCALE_HOME/benchmark/dataset/data/cityscape/client_data_mapping/train.csv              # Allocation of data to each client, turn to iid setting if not provided
+    - test_data_map_file: $FEDSCALE_HOME/benchmark/dataset/data/cityscape/client_data_mapping/test.csv
+    - data_frame_file: $FEDSCALE_HOME/benchmark/dataset/data/cityscape/client_data_mapping/train_data_frame.pkl
+    - test_data_frame_file: $FEDSCALE_HOME/benchmark/dataset/data/cityscape/client_data_mapping/test_data_frame.pkl
+    - client_start_end_rounds_file: $FEDSCALE_HOME/workspace/records/cityscape/client_rank_2_start_end_round.pkl
+    - device_conf_file: $FEDSCALE_HOME/benchmark/dataset/data/device_info/client_device_capacity
+    - model: resnet18
+    - model_zoo: fedscale-torch-zoo
+    - eval_interval: 1                     # How many rounds to run a testing on the testing set
+    - gradient_policy: fed-prox                 # {"fed-yogi", "fed-prox", "fed-avg"}, "fed-avg" by default
+    - rounds: 101                          # Number of rounds to run this training
+    - filter_less: 11                       # Remove clients w/ less than 11 samples
+    - num_loaders: 2
+    - yogi_eta: 3e-3 
+    - yogi_tau: 1e-8
+    - local_steps: 20
+    - learning_rate: 0.001
+    - min_learning_rate: 0.000001
+    - loss_decay: 0.05
+    - batch_size: 20
+    - test_bsz: 20
+    - use_cuda: True
+    - cuda_device: cuda:0
+    - save_checkpoint: True
+    - sample_mode: random
+    - data_mode: sliding_window_cumulate
+    - wandb_token: [Your_Wandb_Token]
+    - split_round: 1
+    - adjust_cluster_selected_num: True
+    - max_cluster_size_ratio: 0.95
+    - recluster_at_drift: True
+    - proxy_mu: 0.1
+    - dump_per_client_accuracy: True
+    - ps_port: 5100
