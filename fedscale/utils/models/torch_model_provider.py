@@ -100,6 +100,7 @@ from fedscale.utils.models.cv_models.resdropresnet_cifar import *
 from fedscale.utils.models.cv_models.resnesta import *
 from fedscale.utils.models.cv_models.resnet import *
 from fedscale.utils.models.cv_models.new_resnet import *
+from fedscale.utils.models.cv_models.new_resnet_nobn import *
 from fedscale.utils.models.cv_models.resnet_cifar import *
 from fedscale.utils.models.cv_models.resnet_cub import *
 from fedscale.utils.models.cv_models.resneta import *
@@ -175,6 +176,10 @@ _models = {
     'new_resnet50': ResNet50,
     'new_resnet101': ResNet101,
     'new_resnet152': ResNet152,
+    'new_resnet18_nobn': ResNet18NOBN,
+    'new_resnet34_nobn': ResNet34NOBN,
+    'resnet18_nobn': ResNet18NOBN,
+    'resnet34_nobn': ResNet34NOBN,
     
     'resnet10': resnet10,
     'resnet12': resnet12,

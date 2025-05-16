@@ -74,7 +74,7 @@ job_conf:
     # - base_delta: 0.1
     # Enable the following two lines to use gradient based clustering with shared model
     # - use_gradient_cluster: True
-    # - embedding_model: resnet18
+    # - embedding_model: resnet18_nobn
     # Enable the following two lines together with the two lines above to use embedding based clustering with pre-trained model
     # - representation_model: $FEDSCALE_HOME/workspace/checkpoint/openImg/model_resnet18_cluster0.pth 
     # - get_projection: True
