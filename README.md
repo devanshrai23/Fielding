@@ -60,7 +60,8 @@ bzip2 -dk manifest.json.bz2
 aws s3 cp s3://spacenet-dataset/Hosted-Datasets/fmow/fmow-rgb/ . --recursive
 ```
 See the original repo [AWS section](https://github.com/fMoW/dataset?tab=readme-ov-file#aws) for more details. Please make sure that you downloaded `fMoW-rgb`.
-After downloading the raw data, use the following commands to preprocess
+
+Download `country_or_zone_samples_in_2015-2018.json` from our [asset Google Drive](https://drive.google.com/drive/folders/1KzyvdQzZh2ruRNv9X3vwnbG0v8x_OGWT?usp=sharing) into `workspace/scripts/data_prepare`. Then use the following commands to preprocess
 ```
 cd workspace/scripts/data_prepare
 python3 prepare_fmow_datasets.py
