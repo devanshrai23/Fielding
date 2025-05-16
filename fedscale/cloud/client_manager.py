@@ -12,11 +12,12 @@ import time
 import os
 import numpy as np
 import torch
-from scipy.stats import wasserstein_distance
+from scipy.spatial.distance import jensenshannon
 from pyclustering.cluster.kmedians import kmedians
 from pyclustering.cluster.silhouette import silhouette_ksearch_type, silhouette_ksearch
 from pyclustering.cluster.kmeans import kmeans
 from pyclustering.cluster.center_initializer import kmeans_plusplus_initializer
+from pyclustering.utils.metric import distance_metric, type_metric
 import copy
 import heapq
 from scipy.cluster.hierarchy import linkage, fcluster
@@ -57,9 +58,8 @@ class ClientManager:
         self.cluster_to_center = {}
         logging.info("created empty cluster_to_center")
 
-        self.wasserstein_distances = {}
-        logging.info("created empty wasserstein_distances")
-        self.avg_center_wasserstein_distance = 0
+        self.jensenshannon_distances = {}
+        self.avg_center_jensenshannon = 0
         self.current_clusters = []
         self.client_rank_to_duration = {}
         self.fast_clients = {}
@@ -73,6 +73,7 @@ class ClientManager:
 
         self.feasibleClients = [[]]
         self.not_yet_feasibleClients = []
+        self.clients_with_gradient = set()
         self.data_drifted_clients = {}
 
         self.rng = Random()
@@ -94,6 +95,8 @@ class ClientManager:
             with open(args.device_avail_file, 'rb') as fin:
                 self.user_trace = pickle.load(fin)
             self.user_trace_keys = list(self.user_trace.keys())
+
+        self.euclidean_square = distance_metric(type_metric.EUCLIDEAN_SQUARE) # this is the default metric of pyclustering kmeans
 
     def load_saved_states(self, states):
         logging.info(f"Client manager loading saved states")
@@ -435,21 +438,30 @@ class ClientManager:
             self.cluster_to_center[0] = np.median(overall_distribution_prob_all, axis=0).tolist()
             for cluster_id, v in current_clusters.items():
                 overall_distribution_prob = np.stack([distribution_prob[client_id] for client_id in v])
-                self.cluster_to_center[cluster_id] = np.median(overall_distribution_prob, axis=0).tolist()
+                self.cluster_to_center[cluster_id] = np.mean(overall_distribution_prob, axis=0).tolist()
             if len(current_clusters) == 1:
-                logging.info(f"only one cluster, set avg_center_wasserstein_distance to 0")
-                self.avg_center_wasserstein_distance = 0
+                logging.info(f"only one cluster, set avg_center_jensenshannon to 0")
+                self.avg_center_jensenshannon = 0
             else:
                 # calculate average wasserstein_distance between cluster centers
                 sum_w_distances = []
                 for i in range(1, len(current_clusters)):
+                    if (not self.args.use_l1_distance) and sum(self.cluster_to_center[i]) <= 0:
+                        logging.info(f"cluster {i} has non-positive sum ({self.cluster_to_center[i]}), skip calculating jensenshannon distance")
+                        continue
                     for j in range(i + 1, len(current_clusters)+1):
-                        sum_w_distances.append(\
+                        if (not self.args.use_l1_distance) and sum(self.cluster_to_center[j]) <= 0:
+                            logging.info(f"cluster {j} has non-positive sum ({self.cluster_to_center[j]}), skip calculating jensenshannon distance")
+                            continue
+                        if self.args.use_l1_distance:
+                            sum_w_distances.append(\
                                 np.linalg.norm(np.array(self.cluster_to_center[i]) - np.array(self.cluster_to_center[j]), ord=1))
-                self.avg_center_wasserstein_distance = sum(sum_w_distances) / max(1,len(sum_w_distances))
+                        else:
+                            sum_w_distances.append(jensenshannon(self.cluster_to_center[i],self.cluster_to_center[j]))
+                self.avg_center_jensenshannon = sum(sum_w_distances) / max(1,len(sum_w_distances))
 
             logging.info(f"global_clustering took {time.time() - start_time} seconds.")
-            logging.info(f"created {len(current_clusters)} clusters with avg_center_wasserstein_distance {self.avg_center_wasserstein_distance}")
+            logging.info(f"created {len(current_clusters)} clusters with avg_center_jensenshannon {self.avg_center_jensenshannon}")
             logging.info(f"cluster sizes: {[(k, len(v)) for k, v in current_clusters.items()]}")
             
             self.current_clusters = list(current_clusters.keys())
@@ -459,6 +471,30 @@ class ClientManager:
             return list(current_clusters.keys()), distribution_prob
 
         return list(current_clusters.keys()), distribution_prob
+    
+    def jl_transform(self, vectors, device, dim, individual=False):
+        try:
+            logging.info(f"jl_transform of {vectors.dtype} vectors size {vectors.size()} with dim {dim}")
+            vectors = vectors.to(device)
+            if not vectors.is_cuda:
+                logging.info(f"jl_transform on cpu")
+            res = torch.zeros((vectors.shape[0], dim), device=device)
+            for i in range(dim):
+
+                try:
+                    direction = torch.randn(vectors.shape[1], device=device) / dim
+                    
+                    res[:,i] = vectors @ direction
+                except Exception as e:
+                    logging.info(f"jl_transform exception: {e}")
+            if individual:
+                return res.view(-1)
+            return res
+
+        except Exception as e:
+            logging.info(f"jl_transform exception: {e}")
+            return None
+
 
     def find_optimal_cluster_numbers(self, samples, ksearch_type="kmedians", kmin=2, kmax=10):
         if len(samples) <= 2:
@@ -473,6 +509,390 @@ class ClientManager:
             scores = search_instance.get_scores()
             retry += 1
         return max(1, amount)
+    
+    def need_gradient_based_global_recluster(self, client_features, force_incremental=False):
+        try:
+            logging.info(f"In need_gradient_based_global_recluster")
+            if len(self.current_clusters) <= 1:
+                logging.info(f"too few clusters, need to recluster")
+                return True
+            for cluster_id in self.current_clusters:
+                if len(self.feasibleClients[cluster_id]) == 0:
+                    logging.info(f"cluster {cluster_id} has no clients, need to recluster")
+                    return True
+                if len(self.feasibleClients[cluster_id]) > self.args.max_cluster_size_ratio * len(self.feasibleClients[0]):
+                    logging.info(f"cluster {cluster_id} has too many clients, need to recluster")
+                    return True
+            observed_values = len(client_features[min(client_features.keys())])
+            prev_cluster_to_jl_center = {}
+            for cluster in self.current_clusters:
+                all_jl_transformed_gradient = [0.0] * observed_values
+                for client_id in self.feasibleClients[cluster]:
+                    all_jl_transformed_gradient = [x+y for x, y in zip(all_jl_transformed_gradient, client_features[client_id])]
+                mean_jl_transformed_gradient = [x/len(self.feasibleClients[cluster]) for x in all_jl_transformed_gradient]
+                prev_cluster_to_jl_center[cluster] = mean_jl_transformed_gradient
+            logging.info(f"prev_cluster_to_jl_center: {prev_cluster_to_jl_center}")
+            
+            # recluster deviating clients
+            touched_clusters = set()
+            
+            for cluster_id in self.data_drifted_clients.keys():
+                try:
+                    deviate_clients = self.data_drifted_clients[cluster_id]
+                    recluster_record = []
+                    
+                    if len(deviate_clients):
+                        logging.info(f"cluster {cluster_id}, {len(deviate_clients)} clients reclustering")
+                        
+                        if cluster_id != 0:
+                            touched_clusters.add(cluster_id)
+
+                        for client_id in deviate_clients:
+                            dist_to_cluster_centers = []
+                            if force_incremental and len(self.feasibleClients[cluster_id]) == 1:
+                                if not (cluster_id in [t[1] for t in recluster_record]):
+                                    logging.info(f"force_incremental, cluster {cluster_id} has only one client, skip moving client {client_id}")
+                                    break
+                            # remove reclustered clients from the current cluster (unless the global cluster 0)
+                            if cluster_id != 0:
+                                self.feasibleClients[cluster_id].remove(client_id)
+                            for cluster in self.current_clusters:
+                                dist_to_cluster_centers.append((cluster, \
+                                    sum((client_features[client_id][k] - prev_cluster_to_jl_center[cluster][k])**2 \
+                                        for k in range(observed_values))))
+                            # find the cluster with the closest center
+                            dist_to_cluster_centers.sort(key = lambda x : x[1])
+                            recluster_record.append((client_id, dist_to_cluster_centers[0][0]))
+
+                        # add reclustered clients into new clusters accordingly
+                        for t in recluster_record:
+                            self.feasibleClients[t[1]].append(t[0])
+                            touched_clusters.add(t[1])
+                            logging.info(f"recluster client {t[0]} from {cluster_id} into {t[1]}")
+                    
+
+                    # reset cluster records
+                    self.data_drifted_clients[cluster_id] = []
+                except Exception as e:
+                    logging.info(f"error in recluster cluster {cluster_id} deviating clients: {e}")
+
+            # update cluster centers
+            curr_cluster_to_jl_center = {}
+            for cluster in self.current_clusters:
+                all_jl_transformed_gradient = [0.0] * observed_values
+                if len(self.feasibleClients[cluster]) == 0:
+                    logging.info(f"cluster {cluster} become empty, assign zero center")
+                    curr_cluster_to_jl_center[cluster] = all_jl_transformed_gradient
+                else:
+                    for client_id in self.feasibleClients[cluster]:
+                        all_jl_transformed_gradient = [x+y for x, y in zip(all_jl_transformed_gradient, client_features[client_id])]
+                    mean_jl_transformed_gradient = [x/len(self.feasibleClients[cluster]) for x in all_jl_transformed_gradient]
+                    curr_cluster_to_jl_center[cluster] = mean_jl_transformed_gradient
+                    logging.info(f"recalculate cluster {cluster} center: {mean_jl_transformed_gradient}")
+            # calculate the distance shifted for each cluster
+            cluster_shifted_distance = []
+            for cluster in touched_clusters:
+                cluster_shifted_distance.append(sum((prev_cluster_to_jl_center[cluster][k] - curr_cluster_to_jl_center[cluster][k])**2 \
+                                                    for k in range(observed_values)))
+            logging.info(f"cluster_shifted_distance: {cluster_shifted_distance}")
+            # recalculate the average center distance
+            sum_distances = []
+            for i in range(1, len(self.current_clusters)):
+                for j in range(i + 1, len(self.current_clusters)+1):
+                    sum_distances.append(sum((curr_cluster_to_jl_center[i][k] - curr_cluster_to_jl_center[j][k])**2 \
+                                            for k in range(observed_values)))
+            avg_center_distance = sum(sum_distances) / max(len(sum_distances), 1)
+            logging.info(f"avg_center_distance: {avg_center_distance}")
+
+            need_global_recluster = False
+            if force_incremental:
+                need_global_recluster = False
+            # check if any cluster center has shifted significantly
+            elif max(cluster_shifted_distance) >= avg_center_distance / 3:
+                need_global_recluster = True
+
+        except Exception as e:
+            logging.info(f"error in need_gradient_based_global_recluster: {e}")
+            need_global_recluster = True
+        return need_global_recluster
+    
+    def global_clustering_gradient_based(self, device, delete_small_cluster=False,
+                                         increment=True, curr_round=0, initial=False):
+        force_incremental = self.args.force_incremental
+        logging.info(f"In global_clustering_gradient_based")
+        if initial:
+            # need to first update client distribution
+            # for following rounds, this step is already applied in aggregator
+            self.global_client_update_label_counts(round=curr_round)
+            # avoid keeping a record for cluster 0
+            self.data_drifted_clients = {}
+        start_time = time.time()
+        all_clients = self.feasibleClients[0]
+        distribution_prob = {}
+        for client_id in all_clients:
+            client_label_counts = self.client_metadata[self.getUniqueId(0, client_id)].label_distribution
+            distribution_prob[client_id] = [x/sum(client_label_counts) for x in client_label_counts]
+        num_labels = len(distribution_prob[all_clients[0]])
+        jl_transform_dimension = 5000
+
+        try:
+            gradient_record = {}
+            accumulate_gradient = None
+            for client_id in set(all_clients).intersection(self.clients_with_gradient):
+                gradient_record[client_id] = torch.from_numpy(self.client_metadata[self.getUniqueId(0, client_id)].gradient).to('cpu')
+                if accumulate_gradient is None:
+                    accumulate_gradient = gradient_record[client_id]
+                else:
+                    accumulate_gradient = accumulate_gradient.add(gradient_record[client_id])
+            # get the average gradient of clients in cluster
+            avg_gradient = accumulate_gradient.div(len(self.clients_with_gradient))
+            logging.info(f"{len(self.clients_with_gradient)} clients gradient mean finding time: {time.time() - start_time} seconds, shape {avg_gradient.size()}")
+        except Exception as e:
+            logging.info(f"error in loading gradients: {e}")
+            return
+
+        num_coordinates = len(avg_gradient)
+        clustered_clients = sorted(gradient_record.keys())
+        if num_coordinates > 10000:
+            jl_transform_dimension = min(num_coordinates // 10, jl_transform_dimension)
+            jl = self.jl_transform(
+                torch.stack([gradient_record[client_id] for client_id in clustered_clients]), device, jl_transform_dimension)
+            logging.info(f"jl_transform result shape {jl.size()}")
+            jl_np = jl.cpu().detach().numpy()
+        else:
+            logging.info(f"use original gradients of dimension: {num_coordinates}")
+            jl_transform_dimension = num_coordinates
+            jl_np = np.array([gradient_record[client_id].flatten().numpy() for client_id in clustered_clients])
+        
+        current_clusters = {}
+        need_global_recluster = True
+
+        # remove clients that are unavailable from the feasibleClients
+        for cluster_id in range(len(self.feasibleClients)):
+            prev_clients = self.feasibleClients[cluster_id]
+            self.feasibleClients[cluster_id] = [client for client in prev_clients if client in clustered_clients]
+        # construct the clustered client feature dictionary
+        clustered_client_features = {}
+        for idx in range(len(clustered_clients)):
+            clustered_client_features[clustered_clients[idx]] = jl_np[idx].tolist()
+       
+        if increment:
+            need_global_recluster = self.need_gradient_based_global_recluster(\
+                clustered_client_features, force_incremental=force_incremental)
+                
+        if need_global_recluster:
+            k_clusters = self.find_optimal_cluster_numbers(jl_np, ksearch_type="kmeans")
+            logging.info(f"optimal k_clusters: {k_clusters}")
+            max_cluster_size = len(jl_np)
+            retry = 0
+            while max_cluster_size > len(jl_np) * self.args.max_cluster_size_ratio and retry < 100:
+                # Prepare initial centers using K-Means++ method.
+                initial_centers = kmeans_plusplus_initializer(jl_np, max(self.args.min_num_cluster, k_clusters)).initialize()
+                # Create instance of K-Means algorithm with prepared centers.
+                kmeans_instance = kmeans(jl_np, initial_centers, metric=self.euclidean_square)
+                # Run cluster analysis and obtain results.
+                kmeans_instance.process()
+                kclusters = kmeans_instance.get_clusters()
+                max_cluster_size = max([len(k) for k in kclusters])
+                logging.info(f"num_cluster: {len(kclusters)}, max_cluster_size: {max_cluster_size}")
+                retry += 1
+            
+            # extract cluster assignments
+            current_clusters = {}
+            for i in range(len(kclusters)):
+                current_clusters[i+1] = []
+                for idx in kclusters[i]:
+                    current_clusters[i+1].append(clustered_clients[idx])
+            logging.info(f"k clusters: {[(k, len(v)) for k, v in current_clusters.items()]}")
+            
+            
+            if delete_small_cluster:
+                # delete small clusters
+                current_clusters = self.cluster_manager.move_clients_by_gain(
+                    clustered_client_features, current_clusters, ksearch_type="kmeans")
+
+        else:
+            current_clusters = {}
+            for cluster_id in self.current_clusters:
+                if len(self.feasibleClients[cluster_id]) > 0:
+                    current_clusters[cluster_id] = self.feasibleClients[cluster_id]
+        
+        if len(self.feasibleClients) < len(current_clusters)+1:
+            # expand self.feasibleClients if creating more clusters
+            for _ in range(len(self.feasibleClients), len(current_clusters)+1):
+                logging.info(f"expand self.feasibleClients by 1")
+                self.feasibleClients.append([])
+                # expand Oort sampler if needed
+                if self.mode == "oort":
+                    self.ucb_sampler.append(None)
+
+        # update current clusters key to start from 1
+        curr_cluster_idx = 1
+        new_current_clusters = {}
+        for v in current_clusters.values():
+            new_current_clusters[curr_cluster_idx] = v
+            self.feasibleClients[curr_cluster_idx] = v
+            # reset Oort sampler if needed
+            if self.mode == "oort":
+                self.reset_sampler(curr_cluster_idx)
+            curr_cluster_idx += 1
+        current_clusters = new_current_clusters
+
+        # calculate the center of each cluster
+        per_cluster_to_center_distance_sum_and_avg = {}
+        for cluster_id, cluster in current_clusters.items():
+            cluster_center = np.mean([clustered_client_features[client_id] for client_id in cluster], axis=0)
+            cluster_to_center_distance_sum = 0
+            for client_id in cluster:
+                cluster_to_center_distance_sum += sum((clustered_client_features[client_id][k] - cluster_center[k])**2 \
+                                                        for k in range(jl_transform_dimension))
+            per_cluster_to_center_distance_sum_and_avg[cluster_id] = \
+                (cluster_to_center_distance_sum, cluster_to_center_distance_sum / len(cluster))
+        logging.info(f"per cluster pairwise distance sum and avg: {per_cluster_to_center_distance_sum_and_avg}")
+        
+        # calculate the cluster centers
+        overall_distribution_prob_all = np.stack([distribution_prob[client_id] for client_id in all_clients])
+        # self.cluster_to_center[0] = np.median(overall_distribution_prob_all, axis=0).tolist()
+        self.cluster_to_center[0] = np.mean(overall_distribution_prob_all, axis=0).tolist()
+        for cluster_id, v in current_clusters.items():
+            overall_distribution_prob = np.stack([distribution_prob[client_id] for client_id in v])
+            # self.cluster_to_center[cluster_id] = np.median(overall_distribution_prob, axis=0).tolist()
+            self.cluster_to_center[cluster_id] = np.mean(overall_distribution_prob, axis=0).tolist()
+        
+        logging.info(f"cluster sizes: {[(k, len(v)) for k, v in current_clusters.items()]}")
+        
+        self.current_clusters = list(current_clusters.keys())
+        logging.info(f"current_clusters: {self.current_clusters}")
+
+        return list(current_clusters.keys()), distribution_prob, need_global_recluster
+    
+    def global_clustering_representation_based(self, delete_small_cluster=False,
+                                         increment=True, curr_round=0, initial=False):
+        force_incremental = self.args.force_incremental
+        logging.info(f"In global_clustering_representation_based")
+        if initial:
+            # need to first update client distribution
+            # for following rounds, this step is already applied in aggregator
+            self.global_client_update_label_counts(round=curr_round)
+            # avoid keeping a record for cluster 0
+            self.data_drifted_clients = {}
+        start_time = time.time()
+        all_clients = self.feasibleClients[0]
+        distribution_prob = {}
+        for client_id in all_clients:
+            client_label_counts = self.client_metadata[self.getUniqueId(0, client_id)].label_distribution
+            distribution_prob[client_id] = [x/sum(client_label_counts) for x in client_label_counts]
+
+        try:
+            representaion_record = {}
+            for client_id in all_clients:
+                representaion_record[client_id] = self.client_metadata[self.getUniqueId(0, client_id)].representation
+            logging.info(f"{len(all_clients)} clients representation finding time: {time.time() - start_time} second")
+        except Exception as e:
+            logging.info(f"error in loading representaion of client {client_id}: {e}")
+            return
+        representation_dimension = len(representaion_record[all_clients[0]])
+        logging.info(f"representation_dimension: {representation_dimension}")
+        
+        # construct the clustered client feature dictionary
+        clustered_client_features = {}
+        for idx in range(len(all_clients)):
+            clustered_client_features[all_clients[idx]] = representaion_record[all_clients[idx]]
+
+        need_global_recluster = True
+        
+        if increment and (not self.args.local_embedding_cluster):
+            # reuse the need_gradient_based_global_recluster function, 
+            # except that we use representation instead of jl-transformed gradient
+            need_global_recluster = self.need_gradient_based_global_recluster(\
+                clustered_client_features, force_incremental=force_incremental)
+
+        use_kmeans = True
+        if need_global_recluster:
+            A = np.array([representaion_record[c] for c in all_clients])
+            max_cluster_size = len(A)
+            retry = 0
+            while max_cluster_size > len(A) * self.args.max_cluster_size_ratio and retry < 100:
+                
+                k_clusters = max(self.args.min_num_cluster, self.find_optimal_cluster_numbers(A, ksearch_type="kmeans"))
+                # k_clusters = self.find_optimal_cluster_numbers(A, ksearch_type="kmeans")
+                logging.info(f"optimal kmeans_clusters: {k_clusters}")
+                initial_centers = kmeans_plusplus_initializer(A, k_clusters).initialize()
+                # Create instance of K-Means algorithm with prepared centers.
+                kmeans_instance = kmeans(A, initial_centers, metric=self.embedding_average_linkage \
+                                        if self.args.local_embedding_cluster else self.euclidean_square)
+                # Run cluster analysis and obtain results.
+                kmeans_instance.process()
+                kclusters = kmeans_instance.get_clusters()
+                max_cluster_size = max([len(k) for k in kclusters])
+                logging.info(f"num_cluster: {len(kclusters)}, max_cluster_size: {max_cluster_size}")
+                retry += 1
+            
+            # extract cluster assignments
+            current_clusters = {}
+            for i in range(len(kclusters)):
+                current_clusters[i+1] = []
+                for idx in kclusters[i]:
+                    current_clusters[i+1].append(all_clients[idx])
+            logging.info(f"k clusters: {[(k, len(v)) for k, v in current_clusters.items()]}")
+            
+            if delete_small_cluster and (not self.args.local_embedding_cluster):
+                # delete small clusters
+                current_clusters = self.cluster_manager.move_clients_by_gain(
+                    clustered_client_features, current_clusters, ksearch_type="kmeans")
+        else:
+            current_clusters = {}
+            for cluster_id in self.current_clusters:
+                if len(self.feasibleClients[cluster_id]) > 0:
+                    current_clusters[cluster_id] = self.feasibleClients[cluster_id]
+        
+        if len(self.feasibleClients) < len(current_clusters)+1:
+            # expand self.feasibleClients if creating more clusters
+            for _ in range(len(self.feasibleClients), len(current_clusters)+1):
+                logging.info(f"expand self.feasibleClients by 1")
+                self.feasibleClients.append([])
+                # expand Oort sampler if needed
+                if self.mode == "oort":
+                    self.ucb_sampler.append(None)
+
+        # update current clusters key to start from 1
+        curr_cluster_idx = 1
+        new_current_clusters = {}
+        for v in current_clusters.values():
+            new_current_clusters[curr_cluster_idx] = v
+            self.feasibleClients[curr_cluster_idx] = v
+            # reset Oort sampler if needed
+            self.reset_sampler(curr_cluster_idx)
+            curr_cluster_idx += 1
+        current_clusters = new_current_clusters
+
+        # calculate the center of each cluster
+        per_cluster_to_center_distance_sum_and_avg = {}
+        for cluster_id, cluster in current_clusters.items():
+            cluster_center = np.mean([clustered_client_features[client_id] for client_id in cluster], axis=0)
+            cluster_to_center_distance_sum = 0
+            for client_id in cluster:
+                cluster_to_center_distance_sum += sum((clustered_client_features[client_id][k] - cluster_center[k])**2 \
+                                                        for k in range(representation_dimension))
+            per_cluster_to_center_distance_sum_and_avg[cluster_id] = \
+                (cluster_to_center_distance_sum, cluster_to_center_distance_sum / len(cluster))
+        logging.info(f"per cluster pairwise distance sum and avg: {per_cluster_to_center_distance_sum_and_avg}")
+        
+        # calculate the cluster centers
+        overall_distribution_prob_all = np.stack([distribution_prob[client_id] for client_id in all_clients])
+        # self.cluster_to_center[0] = np.median(overall_distribution_prob_all, axis=0).tolist()
+        self.cluster_to_center[0] = np.mean(overall_distribution_prob_all, axis=0).tolist()
+        for cluster_id, v in current_clusters.items():
+            overall_distribution_prob = np.stack([distribution_prob[client_id] for client_id in v])
+            # self.cluster_to_center[cluster_id] = np.median(overall_distribution_prob, axis=0).tolist()
+            self.cluster_to_center[cluster_id] = np.mean(overall_distribution_prob, axis=0).tolist()
+        
+        logging.info(f"cluster sizes: {[(k, len(v)) for k, v in current_clusters.items()]}")
+        
+        self.current_clusters = list(current_clusters.keys())
+        logging.info(f"current_clusters: {self.current_clusters}")
+
+        return list(current_clusters.keys()), distribution_prob, need_global_recluster
 
     def client_update_label_counts(self, client_id, new_label_counts):
         unique_id = self.getUniqueId(0, client_id)
@@ -646,14 +1066,20 @@ class ClientManager:
                     client_label_counts = self.client_metadata[self.getUniqueId(0, client_id)].label_distribution
                     client_distribution = [x / sum(client_label_counts) for x in client_label_counts] 
                     for cluster in self.current_clusters:
-                        dist_to_cluster_centers.append((cluster, \
+                        if self.args.use_l1_distance:
+                            dist_to_cluster_centers.append((cluster, \
                                 np.linalg.norm(np.array(client_distribution)-np.array(prev_cluster_to_center[cluster]), ord=1)))
+                        else:
+                            dist_to_cluster_centers.append((cluster, \
+                                    jensenshannon(prev_cluster_to_center[cluster],client_distribution)))
                     # find the cluster with the closest center
                     dist_to_cluster_centers.sort(key = lambda x : x[1])
                     # distance to the center of the previous cluster this client belongs to
-                    dist_to_prev_cluster = np.linalg.norm(np.array(client_distribution)-\
+                    if self.args.use_l1_distance:
+                        dist_to_prev_cluster = np.linalg.norm(np.array(client_distribution)-\
                                                               np.array(prev_cluster_to_center[cluster_id]), ord=1)
-
+                    else:
+                        dist_to_prev_cluster = jensenshannon(prev_cluster_to_center[cluster_id],client_distribution)
                     if cluster_id == 0:
                         # if client was in the global cluster, recluster it into the closest cluster
                         recluster_record.append((client_id, dist_to_cluster_centers[0][0]))
@@ -678,6 +1104,117 @@ class ClientManager:
                 logging.info(f"has drifted clients in cluster {k}")
                 return True
         return False
+    
+    def getDriftedClients(self):
+        drifted_clients = set()
+        for k, v in self.data_drifted_clients.items():
+            if len(v) > 0:
+                drifted_clients.update(v)
+        return drifted_clients
+    
+    def clientReclusterAllGradientBased(self, device, clusters=[0], use_global_model=False, curr_round=0, default_global_recluster=False):
+        logging.info(f"reclustering clusters using gradient {clusters}")
+
+        prev_cluster_to_center = copy.deepcopy(self.cluster_to_center)
+        prev_max_cluster_id = max(prev_cluster_to_center.keys())
+        model_mapping = {}
+
+        _, distribution_prob, need_global_recluster = \
+            self.global_clustering_gradient_based(device, delete_small_cluster=self.delete_small_cluster,
+                                                  curr_round=curr_round, increment=(not default_global_recluster))
+        # find the closest previous cluster for each new cluster
+        for new_cluster in self.current_clusters:       
+            if use_global_model:
+                model_mapping[new_cluster] = 0
+                logging.info(f"new cluster {new_cluster} with {len(self.feasibleClients[new_cluster])} clients use global model by default")
+            elif not need_global_recluster:
+                # if no global recluster, just continue with the previous model
+                # if new_cluster > prev_max_cluster_id, then this is a new singleton cluster, should use global model
+                if new_cluster > prev_max_cluster_id:
+                    model_mapping[new_cluster] = 0
+                else:
+                    model_mapping[new_cluster] = new_cluster
+            else:
+                logging.info(f"new cluster {new_cluster} with {len(self.feasibleClients[new_cluster])} clients: {self.feasibleClients[new_cluster]}")
+                dist_to_previous_center = []
+                for prev_cluster, prev_center in prev_cluster_to_center.items():
+                    distance_sum = 0
+                    for client_id in self.feasibleClients[new_cluster]:
+                        if client_id in distribution_prob:
+                            if self.args.use_l1_distance:
+                                distance_sum += np.linalg.norm(np.array(distribution_prob[client_id])-np.array(prev_center), ord=1)
+                            else:
+                                distance_sum += jensenshannon(distribution_prob[client_id],prev_center)
+                        else:
+                            logging.info(f"{client_id} not in distribution_prob")
+                    dist_to_previous_center.append((prev_cluster, distance_sum))
+                # record the closest previous cluster
+                closest_record = sorted(dist_to_previous_center, key=lambda x:x[1])[0]
+                model_mapping[new_cluster] = closest_record[0]
+                logging.info(f"new cluster {new_cluster} should start with model of old cluster {model_mapping[new_cluster]}, cumulated distance {closest_record[1]}")
+        # remove old clusters
+        cluster_to_remove = []
+        for cluster in self.cluster_to_center:
+            if cluster != 0 and (cluster not in self.current_clusters):
+                cluster_to_remove.append(cluster)
+        for cluster in cluster_to_remove:
+            logging.info(f"remove old cluster {cluster}")
+            del self.cluster_to_center[cluster]
+    
+        # clear the data drifted clients if we do default global reclustering
+        self.data_drifted_clients = {}
+        return model_mapping
+    
+    def clientReclusterAllRepresentationBased(self, device, clusters=[0], use_global_model=False, curr_round=0, default_global_recluster=False):
+        logging.info(f"reclustering clusters using representation {clusters}")
+
+        prev_cluster_to_center = copy.deepcopy(self.cluster_to_center)
+        prev_max_cluster_id = max(prev_cluster_to_center.keys())
+        model_mapping = {}
+
+        _, distribution_prob, need_global_recluster = \
+            self.global_clustering_representation_based(\
+                delete_small_cluster=self.delete_small_cluster,
+                increment=(not default_global_recluster), curr_round=curr_round)
+        # find the closest previous cluster for each new cluster
+        for new_cluster in self.current_clusters:       
+            if use_global_model:
+                model_mapping[new_cluster] = 0
+                logging.info(f"new cluster {new_cluster} with {len(self.feasibleClients[new_cluster])} clients use global model by default")
+            elif not need_global_recluster:
+                # if no global recluster, just continue with the previous model
+                # if new_cluster > prev_max_cluster_id, then this is a new singleton cluster, should use global model
+                if new_cluster > prev_max_cluster_id:
+                    model_mapping[new_cluster] = 0
+                else:
+                    model_mapping[new_cluster] = new_cluster
+            else:
+                logging.info(f"new cluster {new_cluster} with {len(self.feasibleClients[new_cluster])} clients: {self.feasibleClients[new_cluster]}")
+                dist_to_previous_center = []
+                for prev_cluster, prev_center in prev_cluster_to_center.items():
+                    distance_sum = 0
+                    for client_id in self.feasibleClients[new_cluster]:
+                        if client_id in distribution_prob:
+                            distance_sum += np.linalg.norm(np.array(distribution_prob[client_id])-np.array(prev_center), ord=1)
+                        else:
+                            logging.info(f"{client_id} not in distribution_prob")
+                    dist_to_previous_center.append((prev_cluster, distance_sum))
+                # record the closest previous cluster
+                closest_record = sorted(dist_to_previous_center, key=lambda x:x[1])[0]
+                model_mapping[new_cluster] = closest_record[0]
+                logging.info(f"new cluster {new_cluster} should start with model of old cluster {model_mapping[new_cluster]}, cumulated distance {closest_record[1]}")
+        # remove old clusters
+        cluster_to_remove = []
+        for cluster in self.cluster_to_center:
+            if cluster != 0 and (cluster not in self.current_clusters):
+                cluster_to_remove.append(cluster)
+        for cluster in cluster_to_remove:
+            logging.info(f"remove old cluster {cluster}")
+            del self.cluster_to_center[cluster]
+    
+        # clear the data drifted clients if we do default global reclustering
+        self.data_drifted_clients = {}
+        return model_mapping
     
     def clientReclusterAll(self, clusters=[0], use_distribution=True, default_global_recluster=False, round=0,
                            use_global_model=False, force_incremental=False):
@@ -714,7 +1251,7 @@ class ClientManager:
                         client_label_counts = self.client_metadata[self.getUniqueId(0, client_id)].label_distribution
                         distribution_prob[client_id] = [x/sum(client_label_counts) for x in client_label_counts]
                     overall_distribution_prob = np.stack([distribution_prob[client_id] for client_id in self.feasibleClients[cluster]])
-                    self.cluster_to_center[cluster] = np.median(overall_distribution_prob, axis=0).tolist()
+                    self.cluster_to_center[cluster] = np.mean(overall_distribution_prob, axis=0).tolist()
                 for cluster_id in clusters:
                     if len(self.feasibleClients[cluster_id]) > 0:
                         shifted_cluster.update(\
@@ -730,7 +1267,7 @@ class ClientManager:
                     empty_cluster.add(cluster)
                     continue
                 overall_distribution_prob = np.stack([distribution_prob[client_id] for client_id in self.feasibleClients[cluster]])
-                self.cluster_to_center[cluster] = np.median(overall_distribution_prob, axis=0).tolist()
+                self.cluster_to_center[cluster] = np.mean(overall_distribution_prob, axis=0).tolist()
         
         if force_incremental:
             # for logging purpose only
@@ -740,8 +1277,12 @@ class ClientManager:
         elif default_global_recluster or len(empty_cluster) > 0:
             global_recluster = True
         else:
-            global_recluster = self.cluster_manager.label_based_need_global_recluster(\
-                prev_cluster_to_center, shifted_cluster, self.cluster_to_center, self.current_clusters)
+            if self.args.use_pairwise_delta_threshold:
+                global_recluster = self.cluster_manager.label_based_need_global_recluster_pairwise_threshold(\
+                    self.feasibleClients, distribution_prob, self.current_clusters)
+            else:
+                global_recluster = self.cluster_manager.label_based_need_global_recluster(\
+                    prev_cluster_to_center, shifted_cluster, self.cluster_to_center, self.current_clusters)
 
         if global_recluster:
             _, distribution_prob = self.global_clustering(curr_round=round)
@@ -757,7 +1298,10 @@ class ClientManager:
                         distance_sum = 0
                         for client_id in self.feasibleClients[new_cluster]:
                             if client_id in distribution_prob:
-                                distance_sum += np.linalg.norm(np.array(distribution_prob[client_id])-np.array(prev_center), ord=1)
+                                if self.args.use_l1_distance:
+                                    distance_sum += np.linalg.norm(np.array(distribution_prob[client_id])-np.array(prev_center), ord=1)
+                                else:
+                                    distance_sum += jensenshannon(distribution_prob[client_id],prev_center)
                             else:
                                 logging.info(f"{client_id} not in distribution_prob")
                         dist_to_previous_center.append((prev_cluster, distance_sum))
@@ -890,7 +1434,7 @@ class ClientManager:
         return np.median(overall_distribution_prob, axis=0).tolist()
 
     def select_participants(self, num_of_clients: int, cur_time: float = 0, cluster_id=0, test=False,
-                            curr_round=0, check_client_avail=False) -> List[int]:
+                            curr_round=0, check_client_avail=False, get_global_gradient=False) -> List[int]:
         """Select participating clients for current execution task.
 
         Args:
@@ -922,7 +1466,7 @@ class ClientManager:
         self.count += 1
 
         # use all clients when we need to get global properties
-        clients_online = self.getFeasibleClients(cur_time, cluster_id, \
+        clients_online = self.getFeasibleClients(cur_time, cluster_id=0 if get_global_gradient else cluster_id, \
                                                  curr_round=curr_round)
         if check_client_avail and len(self.client_rank_to_avail_round) > 0:
             clients_online = [c for c in clients_online \
@@ -931,7 +1475,7 @@ class ClientManager:
         logging.info(f"Cluster {cluster_id} Round {curr_round}, Wall clock time: {round(cur_time)}, {len(clients_online)} clients online, " +
                      f"{len(self.feasibleClients[cluster_id]) - len(clients_online)} clients offline")
 
-        if len(clients_online) <= num_of_clients:
+        if len(clients_online) <= num_of_clients or get_global_gradient:
             return clients_online
 
         pickled_clients = None
@@ -977,7 +1521,10 @@ class ClientManager:
             for client_id in clients_online:
                 client_label_counts = self.client_metadata[self.getUniqueId(0, client_id)].label_distribution
                 client_distribution = [x/sum(client_label_counts) for x in client_label_counts]
-                client_weight = np.linalg.norm(np.array(client_distribution)-np.array(cluster_distribution_center), ord=1)
+                if self.args.use_l1_distance:
+                    client_weight = np.linalg.norm(np.array(client_distribution)-np.array(cluster_distribution_center), ord=1)
+                else:
+                    client_weight = jensenshannon(cluster_distribution_center,client_distribution)
                 if client_weight > max_distance:
                     logging.info(f"WARNING: client {client_id} with distance {client_weight} to cluster center")
                 clients_weight.append(client_weight)

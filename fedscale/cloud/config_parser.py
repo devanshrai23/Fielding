@@ -33,7 +33,7 @@ parser.add_argument('--device_avail_file', type=str, default=None)
 parser.add_argument('--clock_factor', type=float, default=1.0,
                     help="Refactor the clock time given the profile")
 
-# Minghao: For clustering and data shifting
+# For clustering and data shifting
 parser.add_argument('--test_data_map_file', type=str, default=None)
 parser.add_argument('--data_frame_file', type=str, default=None)
 parser.add_argument('--test_data_frame_file', type=str, default=None)
@@ -51,6 +51,14 @@ parser.add_argument('--min_num_cluster', type=int, default=2)
 parser.add_argument('--max_cluster_size_ratio', type=float, default=0.95)
 parser.add_argument('--data_mode', type=str, default="all")
 parser.add_argument('--round_time_limit', type=int, default=300)
+parser.add_argument('--use_l1_distance', type=bool, default=False)
+parser.add_argument('--use_pairwise_delta_threshold', type=bool, default=False)
+parser.add_argument('--base_delta', type=float, default=0.1)
+
+# For gradient and embedding based clustering
+parser.add_argument('--use_gradient_cluster', type=bool, default=False)
+parser.add_argument('--get_projection', type=bool, default=False)
+parser.add_argument('--representation_model', type=str, default='./workspace/checkpoint/')
 # For robustness analysis
 parser.add_argument('--malicious_ratio', type=float, default=0)
 # for records keeping

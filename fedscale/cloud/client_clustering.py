@@ -1,11 +1,12 @@
 import logging
 import numpy as np
-from scipy.stats import wasserstein_distance
+from scipy.spatial.distance import jensenshannon
 
 from pyclustering.cluster.silhouette import silhouette_ksearch_type, silhouette_ksearch
 from pyclustering.cluster.kmeans import kmeans
 from pyclustering.cluster.center_initializer import kmeans_plusplus_initializer
 from pyclustering.cluster.kmedians import kmedians
+from pyclustering.utils.metric import distance_metric, type_metric
 import copy
 import torch
 
@@ -13,6 +14,16 @@ class ClusterManager:
     def __init__(self, args):
         self.args = args
         logging.info("created empty cluster_to_center")
+        self.manhattan_distance = distance_metric(type_metric.MANHATTAN)
+
+        def js_distance(features1, features2):
+            return jensenshannon(features1, features2)
+        self.js_distance = distance_metric(type_metric.USER_DEFINED, func=js_distance)
+
+        self.base_delta = self.args.base_delta
+        self.delta_threshold = self.base_delta
+        self.drift_event_id = 0
+        self.global_recluster_event_ids = set()
 
     def getUniqueId(self, host_id, client_id):
         return str(client_id)
@@ -34,8 +45,16 @@ class ClusterManager:
                 client_i = sorted_clients[i]
                 client_j = sorted_clients[j]
                 try:
-                    pairwise_distance[client_i][client_j] = \
+                    if self.args.use_l1_distance:
+                        pairwise_distance[client_i][client_j] = \
                             np.linalg.norm(np.array(client_features[client_i]) - np.array(client_features[client_j]), ord=1)
+                    else:
+                        if ksearch_type == "kmeans":
+                            # squared distance
+                            pairwise_distance[client_i][client_j] = sum((client_features[client_i][k] - client_features[client_j][k])**2 \
+                                                            for k in range(observed_values))
+                        else:
+                            pairwise_distance[client_i][client_j] = jensenshannon(client_features[client_i], client_features[client_j])
                     pairwise_distance[client_j][client_i] = pairwise_distance[client_i][client_j]
                 except Exception as e:
                     logging.info(f"error in calculating distance between {client_i} and {client_j}, {e}")
@@ -224,12 +243,48 @@ class ClusterManager:
             retry += 1
         return max(1, amount)
     
+    def label_based_need_global_recluster_pairwise_threshold(self, feasibleClients, distribution_prob, current_clusters):
+
+        # for each cluster, calculate the distance between each pair of its clients
+        # if any pair's distance is greater than self.delta_threshold, return True
+        should_global_recluster = False
+        for cluster in current_clusters:
+            if len(feasibleClients[cluster]) < 2:
+                continue
+            sorted_cluster_clients = sorted(feasibleClients[cluster])
+            for i in range(len(sorted_cluster_clients) - 1):
+                for j in range(i+1, len(sorted_cluster_clients)):
+                    client_i = sorted_cluster_clients[i]
+                    client_j = sorted_cluster_clients[j]
+                    if self.args.use_l1_distance:
+                        distance = np.linalg.norm(np.array(distribution_prob[client_i]) - np.array(distribution_prob[client_j]), ord=1)
+                    else:
+                        distance = jensenshannon(distribution_prob[client_i], distribution_prob[client_j])
+                    if distance > self.delta_threshold:
+                        should_global_recluster = True
+                        break
+        
+        if should_global_recluster:
+            self.global_recluster_event_ids.add(self.drift_event_id)
+        # Delta *= 2 if reclusterings are triggered consecutively by two drift events, and Delta -=c otherwise
+        if should_global_recluster and (self.drift_event_id - 1 in self.global_recluster_event_ids):
+            self.delta_threshold *= 2
+            logging.info(f"Delta is doubled to {self.delta_threshold}")
+        else:
+            self.delta_threshold = max(self.base_delta, self.delta_threshold - self.base_delta)
+            logging.info(f"Delta is decreased to {self.delta_threshold}")
+        self.drift_event_id += 1
+        
+        return should_global_recluster
     def label_based_need_global_recluster(self, prev_cluster_to_center, shifted_cluster,
                                           cluster_to_center, current_clusters):
         cluster_center_shift_distance = []
         for cluster in shifted_cluster:
-            cluster_center_shift_distance.append(\
+            if self.args.use_l1_distance:
+                cluster_center_shift_distance.append(\
                     np.linalg.norm(np.array(prev_cluster_to_center[cluster]) - np.array(cluster_to_center[cluster]), ord=1))
+            else:
+                cluster_center_shift_distance.append(jensenshannon(prev_cluster_to_center[cluster],cluster_to_center[cluster]))
             
             logging.info(f"recalculate cluster {cluster} center, shifted {cluster_center_shift_distance[-1]}")
         
@@ -239,17 +294,20 @@ class ClusterManager:
                 w_distances = []
                 for i in range(1, len(current_clusters)):
                     for j in range(i + 1, len(current_clusters)+1):
-                        w_distances.append(\
+                        if self.args.use_l1_distance:
+                            w_distances.append(\
                                 np.linalg.norm(np.array(cluster_to_center[i]) - np.array(cluster_to_center[j]), ord=1))
-                self.avg_center_wasserstein_distance = sum(w_distances) / len(w_distances)
-                logging.info(f"avg_center_wasserstein_distance becomes {self.avg_center_wasserstein_distance}")
+                        else:
+                            w_distances.append(jensenshannon(cluster_to_center[i],cluster_to_center[j]))
+                self.avg_center_jensenshannon = sum(w_distances) / len(w_distances)
+                logging.info(f"avg_center_jensenshannon becomes {self.avg_center_jensenshannon}")
             else:
-                self.avg_center_wasserstein_distance = 0
-                logging.info(f"avg_center_wasserstein_distance becomes 0 as only one cluster left")
+                self.avg_center_jensenshannon = 0
+                logging.info(f"avg_center_jensenshannon becomes 0 as only one cluster left")
             # check if any cluster's center moved a lot, if so, do global reclustering
             
             for dist in cluster_center_shift_distance:
-                if dist >= self.avg_center_wasserstein_distance / (self.args.global_recluster_thres_ratio):
+                if dist >= self.avg_center_jensenshannon / (self.args.global_recluster_thres_ratio):
                     # trigger global reclustering
                     return True
         return False
@@ -273,7 +331,8 @@ class ClusterManager:
                     # Prepare initial centers using K-Means++ method.
                     initial_centers = kmeans_plusplus_initializer(A, start_num_cluster).initialize()
                 # Create instance of K-Means algorithm with prepared centers.
-                kmeans_instance = kmeans(A, initial_centers)
+                kmeans_instance = kmeans(A, initial_centers, \
+                    metric=self.manhattan_distance if self.args.use_l1_distance else self.js_distance)
                 # Run cluster analysis and obtain results.
                 kmeans_instance.process()
                 kclusters = kmeans_instance.get_clusters()
@@ -318,7 +377,8 @@ class ClusterManager:
                     while num_cluster < start_num_cluster:
                         logging.info(f"redo kmeans clustering for the rest clients, target cluster number: {start_num_cluster}, optimal cluster number: {optimal_num_cluster}")
                         initial_centers = kmeans_plusplus_initializer(A, start_num_cluster).initialize()
-                        kmeans_instance = kmeans(A, initial_centers)
+                        kmeans_instance = kmeans(A, initial_centers,\
+                            metric=self.manhattan_distance if self.args.use_l1_distance else self.js_distance)
                         kmeans_instance.process()
                         kclusters_redo = kmeans_instance.get_clusters()
                         num_cluster = len(kclusters_redo)

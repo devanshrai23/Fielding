@@ -19,6 +19,7 @@ from fedscale.cloud.execution.data_processor import collate, voice_collate_fn
 from fedscale.cloud.execution.rl_client import RLClient
 from fedscale.cloud.fllibs import *
 from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
+from collections import defaultdict
 
 import copy
 import time
@@ -37,6 +38,10 @@ class Executor(object):
         logger.initiate_client_setting()
 
         self.model_adapter = [self.get_client_trainer(args).get_model_adapter(init_model())]
+        if args.use_gradient_cluster:
+            self.representation_model = \
+                self.get_client_trainer(args).get_model_adapter(init_model(for_embedding=True))
+            logging.info(f"create representation model adapter")
 
         self.args = args
         self.num_executors = args.num_executors
@@ -199,6 +204,8 @@ class Executor(object):
         client_id, train_config, cluster_id, train_round = \
             config['client_id'], config['task_config'], config['cluster_id'], config['round']
 
+        train_config['use_shared_model'] = config.get('global_gradient', False)
+        train_config['get_representation'] = train_config['use_shared_model'] and self.args.get_projection
         train_config['round'] = train_round
         if train_round != self.round[cluster_id]:
             logging.info(f"Executor {self.this_rank} Cluster {cluster_id} client {client_id} updated round {self.round[cluster_id]} to {train_round}")
@@ -219,7 +226,8 @@ class Executor(object):
                     response = self.aggregator_communicator.stub.CLIENT_EXECUTE_COMPLETION(
                         job_api_pb2.CompleteRequest(
                             client_id=str(client_id), executor_id=self.executor_id,
-                            event=commons.encode_clusterid(commons.CLIENT_TRAIN, cluster_id), 
+                            event=commons.encode_clusterid(
+                            commons.GLOBAL_GRADIENT if config['global_gradient'] else commons.CLIENT_TRAIN, cluster_id), 
                             status=True, msg=None, meta_result=None, data_result=None
                         )
                     )
@@ -334,8 +342,9 @@ class Executor(object):
             dictionary: The train result
 
         """
-        # try:
-        if not pick_best_test:
+        if conf.use_shared_model:
+            self.representation_model.set_weights(model, is_aggregator=False)
+        else:
             self.model_adapter[cluster_id].set_weights(model, is_aggregator=False)
         conf.client_id = client_id
         conf.tokenizer = tokenizer
@@ -361,7 +370,9 @@ class Executor(object):
                     'training_label_counts': training_label_counts}
        
         train_res = client.train(
-            client_data=client_data, model=self.model_adapter[cluster_id].get_model(), conf=conf)
+            client_data=client_data, 
+            model=self.representation_model.get_model() if conf.use_shared_model else self.model_adapter[cluster_id].get_model(),
+            conf=conf)
         if training_label_counts is not None:
             train_res['training_label_counts'] = training_label_counts
         logging.info(f"Executor {self.this_rank} Cluster {cluster_id} client {client_id} training done, lr {conf.learning_rate}, loss {train_res['moving_loss']}, trained size {train_res['trained_size']}, utility {train_res['utility']}, wall duration {train_res['wall_duration']}")
@@ -500,6 +511,10 @@ class Executor(object):
                     train_model = self.deserialize_response(request.data)
                     train_config['model'] = train_model
                     train_config['client_id'] = int(train_config['client_id'])
+                    if event_type == commons.GLOBAL_GRADIENT:
+                        train_config['global_gradient'] = True
+                    else:
+                        train_config['global_gradient'] = False
                     client_id, train_res = self.Train(train_config)
 
                     report_success = False
@@ -509,7 +524,8 @@ class Executor(object):
                             response = self.aggregator_communicator.stub.CLIENT_EXECUTE_COMPLETION(
                                 job_api_pb2.CompleteRequest(
                                     client_id=str(client_id), executor_id=self.executor_id,
-                                    event=commons.encode_clusterid(commons.UPLOAD_MODEL, cluster_id), 
+                                    event=commons.encode_clusterid(
+                                        commons.GLOBAL_GRADIENT_COMPLETE if event_type == commons.GLOBAL_GRADIENT else commons.UPLOAD_MODEL, cluster_id), 
                                     status=True, msg=None, meta_result=None, data_result=self.serialize_response(train_res)
                                     ))
                             self.dispatch_worker_events(response)

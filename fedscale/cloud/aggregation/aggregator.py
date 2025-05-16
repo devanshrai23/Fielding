@@ -126,10 +126,14 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
         self.need_optimizer_reset = False
         self.round_completion_cluster_count = 0
         self.test_complete_cluster_count = 0
+        self.use_gradient_cluster = args.use_gradient_cluster
 
         self.cluster_clients_to_test = {}
 
         self.global_testing = False
+        self.getting_global_gradient = False
+        self.global_gradient_complete = 0
+        self.representation_model = None
 
         self.client_to_existing_cluster = {}
 
@@ -288,6 +292,17 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
                 num_decays = (self.round[0] - 1) // self.args.decay_round
                 self.args.learning_rate = max(
                     self.args.learning_rate * self.args.decay_factor ** num_decays, self.args.min_learning_rate)
+        elif self.args.use_gradient_cluster:
+            self.representation_model = TorchModelAdapter(
+                    init_model(for_embedding=True),
+                    optimizer=TorchServerOptimizer(
+                        self.args.gradient_policy, self.args, self.device))
+            if self.args.get_projection:
+                if os.path.exists(self.args.representation_model):
+                    self.representation_model.load_checkpoint(self.args.representation_model)
+                    logging.info(f"Loaded shared model for clustering from {self.args.representation_model}")
+                else:
+                    logging.info(f"Shared model file {self.args.representation_model} not found, start from scratch")
         self.model_weights = [self.model_wrapper[0].get_weights()]
 
     def init_task_context(self):
@@ -503,7 +518,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
         return self.model_in_update[cluster_id] == self.tasks_round[cluster_id]
 
     def select_participants(self, select_num_participants, overcommitment=1.3, cluster_id=0, test=False,
-                            check_rank_avail=False):
+                            check_rank_avail=False, get_global_gradient=False):
         """Select clients for next round.
 
         Args:
@@ -518,12 +533,13 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
             return sorted(self.client_manager.select_participants(
                 int(select_num_participants * overcommitment),
                 cur_time=self.global_virtual_clock[cluster_id], cluster_id=cluster_id,
-                test=test, curr_round=self.round[cluster_id], check_client_avail=True)
+                test=test, curr_round=self.round[cluster_id], check_client_avail=True, 
+                get_global_gradient=get_global_gradient)
             )
         return sorted(self.client_manager.select_participants(
             int(select_num_participants * overcommitment),
             cur_time=self.global_virtual_clock[cluster_id], cluster_id=cluster_id,
-            test=test)
+            test=test, get_global_gradient=get_global_gradient)
         )
 
     def client_completion_handler(self, results, cluster_id=0):
@@ -650,7 +666,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
                 self.args.learning_rate * self.args.decay_factor, self.args.min_learning_rate)
             logging.info(f"Learning rate decayed to {self.args.learning_rate}")
 
-    def init_cluster_tasks(self, cluster_id=0):
+    def init_cluster_tasks(self, cluster_id=0, get_global_gradient=False):
         if cluster_id == 0:
             num_to_select = self.args.num_participants
         else:
@@ -661,31 +677,42 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
         # update select participants
         self.sampled_participants[cluster_id] = self.select_participants(
             select_num_participants=num_to_select, overcommitment=self.args.overcommitment,
-            cluster_id=cluster_id, check_rank_avail=(self.args.data_mode != "all"))
-
-        if len(self.sampled_participants[cluster_id]) == 0:
-            logging.info(f"No available clients in cluster {cluster_id}, skip the round")
-            self.round_completion_cluster_count += 1
-            self.round_duration[cluster_id] = 0
-            self.round_stragglers[cluster_id] = []
-            self.loss_accumulator[cluster_id] = []
-            self.stats_util_accumulator[cluster_id] = []
-            self.test_result_accumulator[cluster_id] = []
-            self.test_reported[cluster_id] = []
-            return
-        try:
-            (clients_to_run, round_stragglers, virtual_client_clock, round_duration,
-            flatten_client_duration) = self.tictak_client_tasks(
-                self.sampled_participants[cluster_id], num_to_select, cluster_id)
-        except Exception as ex:
-            logging.info(f"Cohort {cluster_id} Selected participants failed due to {ex}, defualt to use all some sampled clients")
-            clients_to_run = self.sampled_participants[cluster_id][:min(len(self.sampled_participants[cluster_id]), num_to_select)]
-            round_stragglers = self.sampled_participants[cluster_id]
+            cluster_id=cluster_id, check_rank_avail=(self.args.data_mode != "all"), get_global_gradient=get_global_gradient)
+        if get_global_gradient:
+            # if self.args.get_projection and self.round[cluster_id] > self.split_round:
+            if self.round[cluster_id] > self.split_round:
+                clients_to_run = list(set(self.sampled_participants[cluster_id]).intersection(self.client_manager.getDriftedClients()))
+            else:
+                clients_to_run = self.sampled_participants[cluster_id]
+            round_stragglers = []
             virtual_client_clock = {
-            client: {'computation': 1, 'communication': 1} for client in self.sampled_participants[cluster_id]}
-            flatten_client_duration = [1 for c in self.sampled_participants[cluster_id]]
+            client: {'computation': 1, 'communication': 1} for client in clients_to_run}
+            flatten_client_duration = [1 for c in clients_to_run]
             round_duration = 1
-        logging.info(f"Cluster {cluster_id} Selected {len(clients_to_run)} participants to run: {clients_to_run}")
+        else:
+            if len(self.sampled_participants[cluster_id]) == 0:
+                logging.info(f"No available clients in cluster {cluster_id}, skip the round")
+                self.round_completion_cluster_count += 1
+                self.round_duration[cluster_id] = 0
+                self.round_stragglers[cluster_id] = []
+                self.loss_accumulator[cluster_id] = []
+                self.stats_util_accumulator[cluster_id] = []
+                self.test_result_accumulator[cluster_id] = []
+                self.test_reported[cluster_id] = []
+                return
+            try:
+                (clients_to_run, round_stragglers, virtual_client_clock, round_duration,
+                flatten_client_duration) = self.tictak_client_tasks(
+                    self.sampled_participants[cluster_id], num_to_select, cluster_id)
+            except Exception as ex:
+                logging.info(f"Cohort {cluster_id} Selected participants failed due to {ex}, defualt to use all some sampled clients")
+                clients_to_run = self.sampled_participants[cluster_id][:min(len(self.sampled_participants[cluster_id]), num_to_select)]
+                round_stragglers = self.sampled_participants[cluster_id]
+                virtual_client_clock = {
+                client: {'computation': 1, 'communication': 1} for client in self.sampled_participants[cluster_id]}
+                flatten_client_duration = [1 for c in self.sampled_participants[cluster_id]]
+                round_duration = 1
+            logging.info(f"Cluster {cluster_id} Selected {len(clients_to_run)} participants to run: {clients_to_run}")
 
         # Issue requests to the resource manager; Tasks ordered by the completion time
         self.resource_manager.register_tasks(clients_to_run, cluster_id)
@@ -861,7 +888,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
             self.client_to_existing_cluster[client_id] = 0
         logging.info(f"client_to_existing_cluster updated to: {self.client_to_existing_cluster}")
 
-    def round_completion_handler(self, cluster_id=0, after_test=False, after_loading=False):
+    def round_completion_handler(self, cluster_id=0, after_test=False, after_global_gradient=False, after_loading=False):
         """Triggered upon the round completion, it registers the last round execution info,
         broadcast new tasks for executors and select clients for next round.
         """
@@ -869,7 +896,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
         self.curr_round_start_time = None
         # clear new_cluster_mapping
         self.new_cluster_mapping = {}
-        if (not after_test) and (not self.need_loading_cluster_checkpoint):
+        if (not after_test) and (not after_global_gradient) and (not self.need_loading_cluster_checkpoint):
             if self.last_update_clock_round < self.round[cluster_id]:
                 # update the global max virtual clock time to be the max of all clusters in the last round
                 self.max_global_virtual_clock = max(self.global_virtual_clock[:(self.num_cluster+1)])
@@ -930,6 +957,8 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
         if (self.args.data_mode != "all") and self.num_cluster == 0 and cluster_id == 0:
             # when there is only the global cluster, we need to update the label distribution of all clients
             self.client_manager.global_client_update_label_counts(round=self.round[cluster_id])
+        elif self.use_gradient_cluster and cluster_id == 0 and (self.args.data_mode != "all"):
+            self.client_manager.global_client_update_label_counts(round=self.round[cluster_id])
         if cluster_id == 1 and (self.args.data_mode != "all"):
             # update client_to_existing_cluster mapping before recluster for cluster model initialization
             self.update_client_to_existing_cluster()
@@ -943,14 +972,58 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
                                                     )
             logging.info(f"cluster {cluster_id} invoked clientBasedReclusterAll")
 
-        elif cluster_id == 0 and self.round[cluster_id] == self.split_round:
-            # update client_to_existing_cluster mapping before recluster for cluster model initialization
-            self.update_client_to_existing_cluster()
-            logging.info(f"cluster {cluster_id} invoked global_clustering")
-            new_clusters, _ = self.client_manager.global_clustering(
-                curr_round=self.round[cluster_id], initial=True)
-            self.init_splits(new_clusters)
+        if cluster_id == 0 and after_global_gradient:
+            if self.round[cluster_id] == self.split_round:
+                # update client_to_existing_cluster mapping before recluster for cluster model initialization
+                all_clients = self.client_manager.getAllClients()
+                for client_id in all_clients:
+                    self.client_to_existing_cluster[client_id] = 0
+                if self.args.get_projection:
+                    new_clusters, _, _ = self.client_manager.global_clustering_representation_based(
+                        increment=(not self.default_global_recluster),
+                        curr_round=self.round[cluster_id],initial=True)
+                else:
+                    # logging.info(f"cluster {cluster_id} at round {self.round[cluster_id]} invoked global_clustering_gradient_based")
+                    new_clusters, _, _ = self.client_manager.global_clustering_gradient_based(
+                        # device="cpu",
+                        self.device,
+                        curr_round=self.round[cluster_id],
+                        initial=True,
+                        increment=(not self.default_global_recluster))
+                self.init_splits(new_clusters)
+            else:
+                # update client_to_existing_cluster mapping before recluster for cluster model initialization
+                self.update_client_to_existing_cluster()
 
+                if self.args.get_projection:
+                    self.new_cluster_mapping = self.client_manager.clientReclusterAllRepresentationBased(
+                        device=self.device, clusters=list(range(1, self.num_cluster+1)), curr_round=self.round[cluster_id],\
+                            use_global_model=self.use_global_model, 
+                            default_global_recluster=self.default_global_recluster
+                        )
+                else:
+                    self.new_cluster_mapping = self.client_manager.clientReclusterAllGradientBased(
+                        # device="cpu",
+                        device=self.device, 
+                        clusters=list(range(1, self.num_cluster+1)), curr_round=self.round[cluster_id],\
+                            use_global_model=self.use_global_model,
+                            default_global_recluster=self.default_global_recluster
+                        )
+                
+                for new_cluster in sorted(self.new_cluster_mapping.keys()):
+                    closest_prev = self.new_cluster_mapping[new_cluster]
+                    self.init_new_cluster(new_cluster_id=new_cluster, closest_prev_cluster=closest_prev)
+                self.num_cluster = len(self.new_cluster_mapping)
+                for new_cluster_id in self.new_cluster_mapping.keys():
+                    self.init_cluster_tasks(new_cluster_id)
+                    self.broadcast_aggregator_events(commons.encode_clusterid(commons.CLUSTER_SPLIT, new_cluster_id))
+                    self.broadcast_aggregator_events(commons.encode_clusterid(commons.UPDATE_MODEL, new_cluster_id))
+                    time.sleep(1)
+                    self.broadcast_aggregator_events(commons.encode_clusterid(commons.START_ROUND, new_cluster_id))
+                    # if self.args.permute_interval == 1 and self.round[new_cluster_id] % self.args.eval_interval == 0:
+                    #     # ensure that all clusters are tested when we permute every round
+                    #     self.broadcast_aggregator_events(commons.encode_clusterid(commons.MODEL_TEST, new_cluster_id))
+                    logging.info(f"Reclustering resulted new cluster {new_cluster_id}")
             # cluster 0 should proceed as normal
             self.init_cluster_tasks(cluster_id)
             self.update_default_task_config(cluster_id)
@@ -959,6 +1032,35 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
                 time.sleep(1)
             self.broadcast_aggregator_events(commons.encode_clusterid(commons.START_ROUND, 0))
             self.curr_round_start_time = time.time()
+
+        elif cluster_id == 0 and self.round[cluster_id] == self.split_round:
+            if self.use_gradient_cluster:
+                self.init_cluster_tasks(cluster_id, get_global_gradient=True)
+                self.getting_global_gradient = True
+                self.global_gradient_complete = 0
+                self.broadcast_aggregator_events(commons.encode_clusterid(commons.GLOBAL_GRADIENT, 0))
+            else:
+                # update client_to_existing_cluster mapping before recluster for cluster model initialization
+                self.update_client_to_existing_cluster()
+                logging.info(f"cluster {cluster_id} invoked global_clustering")
+                new_clusters, _ = self.client_manager.global_clustering(
+                    curr_round=self.round[cluster_id], initial=True)
+                self.init_splits(new_clusters)
+
+                # cluster 0 should proceed as normal
+                self.init_cluster_tasks(cluster_id)
+                self.update_default_task_config(cluster_id)
+                if not after_test:
+                    self.broadcast_aggregator_events(commons.encode_clusterid(commons.UPDATE_MODEL, 0))
+                    time.sleep(1)
+                self.broadcast_aggregator_events(commons.encode_clusterid(commons.START_ROUND, 0))
+                self.curr_round_start_time = time.time()
+
+        elif self.use_gradient_cluster and cluster_id == 0 and self.client_manager.hasDriftedClients():
+            self.init_cluster_tasks(cluster_id, get_global_gradient=True)
+            self.getting_global_gradient = True
+            self.global_gradient_complete = 0
+            self.broadcast_aggregator_events(commons.encode_clusterid(commons.GLOBAL_GRADIENT, 0))
             
         elif len(self.new_cluster_mapping) > 0:
             for new_cluster in sorted(self.new_cluster_mapping.keys()):
@@ -982,7 +1084,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
                 logging.info(f"Clusters {list(range(1, self.num_cluster+1))} loaded from checkpoint")
                 for i in range(0, self.num_cluster+1):
                     self.round_completion_handler(cluster_id=i, after_test=True, after_loading=True)
-                    if len(self.new_cluster_mapping) > 0:
+                    if len(self.new_cluster_mapping) > 0 or self.getting_global_gradient:
                         break
             else:
                 self.init_cluster_tasks(cluster_id)
@@ -999,15 +1101,9 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
         if self.wandb != None:
             self.wandb.log({
                 f'Train/round_to_loss_cluster{cluster_id}': avg_loss,
-                f'Train/round_duration_cluster{cluster_id} (min)': self.round_duration[cluster_id]/60.,
-                f'Train/time_to_round_cluster{cluster_id} (min)': self.global_virtual_clock[cluster_id]/60.,
                 f'Train/round_to_top1_accuracy_cluster{cluster_id}': float(self.total_top1[cluster_id])/max(1, self.total_trained_samples[cluster_id]),
                 f'Train/mean_top1_accuracy_cluster{cluster_id}': np.mean(self.per_client_top1[cluster_id]),
             }, step=self.round[cluster_id])
-            if cluster_id == 0:
-                self.wandb.log({
-                    f'Train/time_to_round (min)': self.max_global_virtual_clock/60.,
-                }, step=self.round[cluster_id])
         
     def log_all_clusters_mean_test_result(self):
         """Log the mean testing result of all clusters, and then for all clients
@@ -1054,17 +1150,14 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
             for cluster_id in range(1, self.num_cluster+1):
                 total_unclustered_clients = set(total_unclustered_clients) - \
                     set(self.cluster_clients_to_test[cluster_id])
-            logging.info(f"Cluster 0 has {len(total_unclustered_clients)} (out of {len(self.cluster_clients_to_test[0])}) unclustered clients: {total_unclustered_clients}")
             unclustered_client_top1_accuracy = []
             clustered_client_top1_on_global_model = []
             for client_top1 in self.per_client_test_top1[0]:
                 if client_top1[0] in total_unclustered_clients:
-                    logging.info(f"Client {client_top1[0]} using the global model, top1 accuracy: {client_top1[1]}")
                     all_per_client_top1_accuracy.append(client_top1[1])
                     unclustered_client_top1_accuracy.append(client_top1[1])
                 else:
                     clustered_client_top1_on_global_model.append(client_top1[1])
-            logging.info(f"Cluster 0 has {len(unclustered_client_top1_accuracy)} per client test top1 recrods for unclustered clients using the global model")
             if len(all_per_client_top1_accuracy) != len(self.cluster_clients_to_test[0]):
                 logging.info(f"WARNING: all_per_client_top1_accuracy has length {len(all_per_client_top1_accuracy)}, expected: {len(self.cluster_clients_to_test[0])}")
             logging.info(f"clustered_client_top1_on_global_model: {np.mean(clustered_client_top1_on_global_model)}")
@@ -1074,8 +1167,6 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
             else:
                 mean_per_unclustered_client_top1_accuracy = np.mean(unclustered_client_top1_accuracy)
                 median_per_unclustered_client_top1_accuracy = np.median(unclustered_client_top1_accuracy)
-                logging.info(f"all_unclustered_clients_mean_top1_accuracy: {mean_per_unclustered_client_top1_accuracy}")
-                logging.info(f"all_unclustered_clients_median_top1_accuracy: {median_per_unclustered_client_top1_accuracy}")
             self.wandb.log({
                 'Test/all_unclustered_clients_mean_top1_accuracy': mean_per_unclustered_client_top1_accuracy,
                 'Test/all_unclustered_clients_median_top1_accuracy': median_per_unclustered_client_top1_accuracy,
@@ -1217,7 +1308,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
         }
         return conf
 
-    def create_client_task(self, executor_id, cluster_id = 0, reconnect=False):
+    def create_client_task(self, executor_id, cluster_id = 0, reconnect=False, use_shared_model=False):
         """Issue a new client training task to specific executor
 
         Args:
@@ -1240,7 +1331,8 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
             config = self.get_client_conf(next_client_id)
             train_config = {'client_id': next_client_id, 'task_config': config, 'cluster_id': cluster_id, 
                             'round': self.round[cluster_id]}
-
+        if use_shared_model and self.representation_model is not None:
+            return train_config, self.representation_model.get_weights()
         return train_config, self.model_wrapper[cluster_id].get_weights()
 
     def get_test_client_set(self, cluster_id=0):
@@ -1277,8 +1369,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
                     self.cluster_clients_to_test[0] += \
                         unclustered_clients[:max((min(50, len(unclustered_clients))), \
                                                  int(len(unclustered_clients)*self.args.test_client_ratio))]
-                    logging.info(f"Cluster 0 selected {max(min(50, len(unclustered_clients)), int(len(unclustered_clients)*self.args.test_client_ratio))} additional \
-unclustered clients for testing")
+                    
             # for other clusters, no need to reselect again cause their test clients are already selected 
             # when the global cluster calls this function
 
@@ -1382,15 +1473,28 @@ unclustered clients for testing")
                 if response_msg is None:
                     current_event = commons.encode_clusterid(commons.DUMMY_EVENT)
                     if self.experiment_mode != commons.SIMULATION_MODE:
-                        self.individual_client_events[executor_id].append(commons.CLIENT_TRAIN)
+                        self.individual_client_events[executor_id].append(
+                            commons.GLOBAL_GRADIENT if self.getting_global_gradient else commons.CLIENT_TRAIN)
                 else:
-                    current_event = commons.encode_clusterid(commons.CLIENT_TRAIN, response_msg['cluster_id'])
+                    if self.getting_global_gradient:
+                        current_event = commons.encode_clusterid(commons.GLOBAL_GRADIENT, response_msg['cluster_id'])
+                    else:
+                        current_event = commons.encode_clusterid(commons.CLIENT_TRAIN, response_msg['cluster_id'])
             elif event_type == commons.CLUSTER_SPLIT:
                 logging.info(f"new_cluster_id {cluster_id} to start with {self.new_cluster_mapping.get(cluster_id, 0)} model at round {self.global_round}")
                 # round is self.global_round-1 as the per-cluster round then get updated in UPDATE_MODEL
                 response_msg = {'new_cluster_id': cluster_id, \
                                 'prev_cluster_id': self.new_cluster_mapping.get(cluster_id, 0), \
                                 'round': self.global_round-1}
+            elif event_type == commons.GLOBAL_GRADIENT:
+                # get the global model
+                response_msg, response_data = self.create_client_task(
+                    executor_id, cluster_id=0, use_shared_model=True)
+                if response_msg is None:
+                    current_event = commons.encode_clusterid(commons.DUMMY_EVENT)
+                    if self.experiment_mode != commons.SIMULATION_MODE:
+                        self.individual_client_events[executor_id].append(
+                            commons.GLOBAL_GRADIENT)
             elif event_type == commons.MODEL_TEST:
                 response_msg = self.get_test_config(client_id, cluster_id)
             elif event_type == commons.UPDATE_MODEL:
@@ -1410,7 +1514,15 @@ unclustered clients for testing")
             if self.curr_round_start_time and \
                 time.time() - self.curr_round_start_time > self.args.round_time_limit:
                 logging.info(f"Round {self.round[0]} time limit reached, force to complete")
-                if self.global_testing:
+                if self.getting_global_gradient:
+                    self.global_gradient_complete += 1
+                    if self.global_gradient_complete == self.tasks_round[0]:
+                        # clear all event queues
+                        self.resource_manager.clear_cluster(cluster_id=0)
+                        self.getting_global_gradient = False
+                        logging.info(f"Received all global model gradients")
+                        self.round_completion_handler(cluster_id=0, after_global_gradient=True)
+                elif self.global_testing:
                     self.test_complete_cluster_count += 1
                     if self.test_complete_cluster_count == self.num_cluster + 1:
                         # clear all event queues
@@ -1422,7 +1534,7 @@ unclustered clients for testing")
                         self.test_complete_cluster_count = 0
                         for i in range(0, self.num_cluster+1):
                             self.round_completion_handler(cluster_id=i, after_test=True)
-                            if len(self.new_cluster_mapping) > 0:
+                            if len(self.new_cluster_mapping) > 0 or self.getting_global_gradient:
                                 # just globally reclustered, old clusters don't need to proceed training
                                 break
                         logging.info(f"forced all clusters done testing")
@@ -1460,12 +1572,19 @@ unclustered clients for testing")
                 if commons.encode_clusterid(commons.CLIENT_TRAIN, cluster_id) not in self.individual_client_events[executor_id]:
                     self.individual_client_events[executor_id].append(
                         commons.encode_clusterid(commons.CLIENT_TRAIN, cluster_id))
+        elif event_type == commons.GLOBAL_GRADIENT:
+            if execution_status is False:
+                logging.error(f"Executor {executor_id} fails to run client {client_id}, due to {execution_msg}")
+            if self.resource_manager.has_next_task(executor_id, cluster_id):
+                if commons.encode_clusterid(commons.GLOBAL_GRADIENT, cluster_id) not in self.individual_client_events[executor_id]:
+                    self.individual_client_events[executor_id].append(
+                        commons.encode_clusterid(commons.GLOBAL_GRADIENT, cluster_id))
                     
         elif event_type == commons.EXECUTOR_RECONNECT:
             self.individual_client_events[executor_id].append(
                         commons.encode_clusterid(commons.EXECUTOR_RECONNECT, cluster_id))
 
-        elif event_type in (commons.MODEL_TEST, commons.UPLOAD_MODEL):
+        elif event_type in (commons.MODEL_TEST, commons.UPLOAD_MODEL, commons.GLOBAL_GRADIENT_COMPLETE):
             self.add_event_handler(
                 executor_id, event, meta_result, data_result)
         else:
@@ -1515,7 +1634,7 @@ unclustered clients for testing")
                 current_event = self.broadcast_events_queue.popleft()
                 event_type, cluster_id = commons.decode_clusterid(current_event)
 
-                if event_type in (commons.UPDATE_MODEL, commons.MODEL_TEST, commons.CLUSTER_SPLIT):
+                if event_type in (commons.UPDATE_MODEL, commons.MODEL_TEST, commons.CLUSTER_SPLIT, commons.GLOBAL_GRADIENT):
                     self.dispatch_client_events(current_event)
 
                 elif event_type == commons.START_ROUND:
@@ -1557,10 +1676,48 @@ unclustered clients for testing")
                                 self.global_testing = False
                                 for i in range(0, self.num_cluster+1):
                                     self.round_completion_handler(cluster_id=i, after_test=True)
-                                    if len(self.new_cluster_mapping) > 0:
+                                    if len(self.new_cluster_mapping) > 0 or self.getting_global_gradient:
                                         break
                                 logging.info(f"all clusters done testing")
 
+                elif event_type == commons.GLOBAL_GRADIENT_COMPLETE:
+                    logging.info(f"Received global model gradient from executor {client_id}, {self.global_gradient_complete+1}/{self.tasks_round[0]}")
+                    results = self.deserialize_response(data)
+                    try:
+                        # ================== Aggregate weights ======================
+                        self.update_lock.acquire()
+                        if self.args.get_projection:
+                            self.client_manager.register_feedback(results['client_id'], 
+                                                                results['utility'],
+                                                                cluster_id=0,
+                                                                top1_accu=int(results['top_1'])/max(1, int(results['trained_size'])),
+                                                                top5_accu=int(results['top_1'])/max(1, int(results['trained_size'])),
+                                                                representation=results['model_projection'], 
+                                                                ignore_sampler=True
+                                                                )
+                        
+                        else:
+                            self.client_manager.register_feedback(results['client_id'], 
+                                                            results['utility'],
+                                                            cluster_id=0,
+                                                            new_weight=results['update_weight'],
+                                                            top1_accu=int(results['top_1'])/max(1, int(results['trained_size'])),
+                                                            # top5_accu=int(results['top_5'])/max(1, int(results['trained_size'])),
+                                                            ignore_sampler=True
+                                                            )
+                    
+                    except Exception as ex:
+                        logging.info(f"client completion handler failed on Cluster {cluster_id} Client {results['client_id']} due to {ex}")
+
+                    finally:
+                        self.update_lock.release()
+                    self.global_gradient_complete += 1
+                    if self.global_gradient_complete == self.tasks_round[0]:
+                        # clear all event queues
+                        self.resource_manager.clear_cluster(cluster_id=0)
+                        self.getting_global_gradient = False
+                        logging.info(f"Received all global model gradients")
+                        self.round_completion_handler(cluster_id=0, after_global_gradient=True)
                 else:
                     logging.error(f"Event {current_event} is not defined")
 

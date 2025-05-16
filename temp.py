@@ -87,8 +87,10 @@ os.environ['MASTER_ADDR'] = parser.args.ps_ip
 os.environ['MASTER_PORT'] = parser.args.ps_port
 
 outputClass = {'Mnist': 10, 'cifar10': 10, "imagenet": 1000, 'emnist': 47, 'amazon': 5, 'fmow': 62,
-               'openImg': 100, 'google_speech': 35, 'femnist': 62, 'yelp': 5, 'inaturalist': 1010,
-               'core50': 50, 'cityscape': 6, 'waymo_classified': 4,
+               'openImg': 100, 
+            #    'openImg': 596, 
+               'google_speech': 35, 'femnist': 62, 'yelp': 5, 'inaturalist': 1010,
+               'urban_vegas': 6, 'core50': 50, 'cityscape': 6, 'waymo_classified': 4,
                }
 
 
@@ -105,6 +107,12 @@ def init_model(for_embedding=False):
         model = AutoModelWithLMHead.from_config(config)
         tokenizer = AlbertTokenizer.from_pretrained(
             parser.args.model, do_lower_case=True)
+
+        # model_name = 'google/mobilebert-uncased'
+        # config = AutoConfig.from_pretrained(model_name)
+        # tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        # model = MobileBertForPreTraining.from_pretrained(model_name)
+        # model = AutoModelWithLMHead.from_config(config)
 
     elif parser.args.task == 'text_clf':
 
@@ -210,6 +218,7 @@ def init_model(for_embedding=False):
                 if parser.args.task == "cv":
                     model = get_cv_model(name=parser.args.embedding_model if for_embedding else parser.args.model,
                                          num_classes=outputClass[parser.args.data_set],
+                                        #  in_size=(128, 128)
                                          in_size=input_dimension,
                                          pretrained=parser.args.pretrained,
                                          )
@@ -279,16 +288,17 @@ def init_dataset():
             train_dataset = datasets.EMNIST(
                 parser.args.data_dir, split='balanced', train=True, download=True, transform=transforms.ToTensor())
 
-        elif parser.args.data_set == 'femnist':
+        elif parser.args.data_set == 'femnist' or parser.args.data_set == 'urban_vegas':
             from fedscale.dataloaders.femnist import FEMNIST
 
+            # train_transform, test_transform = get_data_transform('mnist')
             train_transform, test_transform = get_data_transform('femnist')
             train_dataset = FEMNIST(
                 parser.args.data_dir, dataset='train', transform=train_transform)
             test_dataset = FEMNIST(
                 parser.args.data_dir, dataset='test', transform=test_transform)
             
-        elif parser.args.data_set == "core50" or parser.args.data_set == "cityscape":
+        elif parser.args.data_set == "core50":
             from fedscale.dataloaders.core50 import CORE50
             logging.info(f"Loading {parser.args.data_set} dataset ...")
             train_transform, test_transform = get_data_transform(parser.args.data_set)
@@ -297,6 +307,20 @@ def init_dataset():
                 parser.args.data_dir, dataset='train', transform=train_transform)
             test_dataset = CORE50(
                 parser.args.data_dir, dataset='test', transform=test_transform)
+            
+        elif parser.args.data_set == "cityscape":
+            from fedscale.dataloaders.core50 import CORE50
+            logging.info(f"Loading {parser.args.data_set} dataset ...")
+            train_transform, test_transform = get_data_transform(parser.args.data_set)
+            logging.info("Transforms loaded ...")
+            train_dataset = CORE50(
+                parser.args.data_dir, dataset='train', transform=train_transform)
+            test_dataset = CORE50(
+                parser.args.data_dir, dataset='test', transform=test_transform)
+            # train_dataset = CORE50(
+            #     parser.args.data_dir, dataset='train_alt', transform=train_transform)
+            # test_dataset = CORE50(
+            #     parser.args.data_dir, dataset='test_alt', transform=test_transform)
             
         elif parser.args.data_set == 'fmow':
             from fedscale.dataloaders.fmow import FMoW
@@ -307,6 +331,10 @@ def init_dataset():
                 parser.args.data_dir, img_root='/data/fMoW/train_cropped', dataset='train', transform=train_transform)
             test_dataset = FMoW(
                 parser.args.data_dir, img_root='/data/fMoW/train_cropped', dataset='test', transform=test_transform)
+            # train_dataset = FMoW(
+            #     parser.args.data_dir, img_root='/data/fMoW/train_cropped', dataset='train_all', transform=train_transform)
+            # test_dataset = FMoW(
+            #     parser.args.data_dir, img_root='/data/fMoW/train_cropped', dataset='test_all', transform=test_transform)
         
         elif parser.args.data_set == "waymo_classified":
             from fedscale.dataloaders.core50 import CORE50
@@ -317,6 +345,10 @@ def init_dataset():
                 parser.args.data_dir, dataset='train', transform=train_transform)
             test_dataset = CORE50(
                 parser.args.data_dir, dataset='test', transform=test_transform)
+            # train_dataset = CORE50(
+            #     parser.args.data_dir, dataset='train_all', transform=train_transform)
+            # test_dataset = CORE50(
+            #     parser.args.data_dir, dataset='test_all', transform=test_transform)
         
         elif parser.args.data_set == 'openImg':
             from fedscale.dataloaders.openimage import OpenImage
@@ -324,8 +356,16 @@ def init_dataset():
             train_transform, test_transform = get_data_transform('openImg')
             train_dataset = OpenImage(
                 parser.args.data_dir, dataset='train', transform=train_transform)
+            # test_dataset = OpenImage(
+            #     parser.args.data_dir, dataset='test', transform=test_transform)
             test_dataset = OpenImage(
                 parser.args.data_dir, dataset='test', transform=test_transform, src_subdir='train')
+            # train_dataset = OpenImage(
+            #     parser.args.data_dir, dataset='train_all', transform=train_transform)
+            # # test_dataset = OpenImage(
+            # #     parser.args.data_dir, dataset='test', transform=test_transform)
+            # test_dataset = OpenImage(
+            #     parser.args.data_dir, dataset='test_all', transform=test_transform, src_subdir='train')
 
         elif parser.args.data_set == 'blog':
             train_dataset = load_and_cache_examples(
@@ -403,7 +443,7 @@ def init_dataset():
                                               spec_augment=False)
         else:
             logging.info('DataSet must be {}!'.format(
-                ['Mnist', 'Cifar', 'openImg', 'blog', 'stackoverflow', 'speech', 'yelp', 'fmow',
+                ['Mnist', 'Cifar', 'openImg', 'blog', 'stackoverflow', 'speech', 'yelp', 'urban_vegas', 'fmow',
                  'core50', 'cityscape', 'waymo_classified']))
             sys.exit(-1)
 

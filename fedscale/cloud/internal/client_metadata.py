@@ -44,16 +44,13 @@ class ClientMetadata:
         Registers the representation of the client
         """
         self.representation = np.concatenate([r.flatten() for r in representation])
-    
-    def register_gradient(self, prev_params, update):
+
+    def register_gradient(self, gradients):
         """
         Registers the latest gradients of the client
         """
-        prev_weights = [p.cpu().numpy() for p in prev_params]
-        # NOTE: state_dict() is an ordered dictionary, so iterating over it is fine
-        new_weights = [update[p] for p in update]
-
-        gradient = [p_prev - p_new for p_prev, p_new in zip(prev_weights, new_weights)]
+        # NOTE: From Python 3.7 onwards, dictionaries preserve insertion order as a language feature.
+        gradient = [g for g in gradients.values()]
         gradient = np.concatenate([g.flatten() for g in gradient])
         self.gradient = gradient
 

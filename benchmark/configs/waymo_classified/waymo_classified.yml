@@ -67,3 +67,13 @@ job_conf:
     - proxy_mu: 0.1
     - dump_per_client_accuracy: True
     - ps_port: 5100
+    - use_l1_distance: True # use l1 distance to calculate the distance between two distribution vectors (disable this if you want to use Jensen–Shannon distance)
+    # Enable the following two lines to trigger global reclustering based on pairwise distance
+    # - use_pairwise_delta_threshold: True
+    # - base_delta: 0.1
+    # Enable the following two lines to use gradient based clustering with shared model
+    # - use_gradient_cluster: True
+    # - embedding_model: resnet18
+    # Enable the following two lines together with the two lines above to use embedding based clustering with pre-trained model
+    # - representation_model: $FEDSCALE_HOME/workspace/checkpoint/waymo_classified/model_resnet18_cluster0.pth 
+    # - get_projection: True

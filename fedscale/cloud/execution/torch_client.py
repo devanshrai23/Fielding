@@ -41,6 +41,7 @@ class TorchClient(ClientBase):
         self.train_len = 0
         self.train_labels = []
         self.projection = None
+        self.accumulate_gradient = None
 
     @overrides
     def train(self, client_data, model, conf):
@@ -58,7 +59,10 @@ class TorchClient(ClientBase):
         model = model.to(device=self.device)
         model.train()
 
-        if self.args.run_epochs:
+        if conf.use_shared_model:
+            self.accumulate_gradient = None
+            trained_unique_samples = len(client_data.dataset)
+        elif self.args.run_epochs:
             trained_unique_samples = len(client_data.dataset) * conf.local_steps
         else:
             trained_unique_samples = min(
@@ -74,13 +78,22 @@ class TorchClient(ClientBase):
         criterion = self.get_criterion(conf)
         error_type = None
 
-        target_steps = conf.local_steps * len(client_data) if self.args.run_epochs else min(conf.local_steps, len(client_data))
+        if conf.use_shared_model:
+            target_steps = len(client_data)
+        else:
+            target_steps = conf.local_steps * len(client_data) if self.args.run_epochs else min(conf.local_steps, len(client_data))
         while self.completed_steps < target_steps:
             try:
-                trainRes = self.train_step(client_data, conf, model, optimizer, criterion, target_steps)
+                trainRes = self.train_step(client_data, conf, model, optimizer, criterion, target_steps,
+                                           get_projection=conf.get_representation, skip_optimizer_step=conf.use_shared_model)
             except Exception as ex:
                 error_type = ex
                 break
+
+        if error_type is None:
+            logging.info(f"Training of (CLIENT: {client_id}) completes, success {self.completed_steps >= target_steps}, trained_unique_samples {trained_unique_samples}, all labels {trainRes['train_labels']}")
+        else:
+            logging.info(f"Training of (CLIENT: {client_id}) failed as {error_type}")
 
         state_dicts = model.state_dict()
         model_param = {p: state_dicts[p].data.cpu().numpy()
@@ -90,18 +103,24 @@ class TorchClient(ClientBase):
                        'success': self.completed_steps >= target_steps
                     }
 
-        if error_type is None:
-            logging.info(f"Training of (CLIENT: {client_id}) completes, success {results['success']}, trained_unique_samples {trained_unique_samples}, all labels {trainRes['train_labels']}")
-        else:
-            logging.info(f"Training of (CLIENT: {client_id}) failed as {error_type}")
-
         results['utility'] = math.sqrt(
             self.loss_squared) * float(trained_unique_samples)
-        results['update_weight'] = model_param
+        if conf.use_shared_model and (self.accumulate_gradient is not None):
+            results['update_weight'] = {p: self.accumulate_gradient[p].cpu().numpy() / trained_unique_samples for p in self.accumulate_gradient}
+        else:
+            results['update_weight'] = model_param
         results['wall_duration'] = 0
 
         results['top_1'] = trainRes["top_1"]
         results['top_5'] = trainRes["top_5"]
+        if conf.get_representation:
+            logging.info(f"client {client_id} original representation size {self.projection.size()}")
+            # find the sum of projection along each column and move the sum to cpu
+            projection = (torch.sum(self.projection, dim=0)).cpu().detach().numpy()
+            # divide the sum by the number of samples
+            projection = projection / trained_unique_samples
+            results['model_projection'] = projection
+            logging.info(f"client {client_id} model projection size {results['model_projection'].shape}")
 
         return results
 
@@ -154,7 +173,7 @@ class TorchClient(ClientBase):
                 reduction='none').to(device=self.device)
         return criterion
 
-    def train_step(self, client_data, conf, model, optimizer, criterion, target_steps):
+    def train_step(self, client_data, conf, model, optimizer, criterion, target_steps, get_projection=False, skip_optimizer_step=False):
         train_start = time.time()
 
         for data_pair in client_data:
@@ -230,6 +249,13 @@ class TorchClient(ClientBase):
                         proj, output = outputs
                     else:
                         output = outputs
+
+                    if get_projection:
+                        if self.projection is None:
+                            self.projection = proj.flatten(start_dim=1).detach()
+                        else:
+                            self.projection = torch.cat(
+                                (self.projection, proj.flatten(start_dim=1).detach()), dim=0)
                     
                     loss = criterion(output, target)
                     # record test accuracy
@@ -266,14 +292,24 @@ class TorchClient(ClientBase):
                         self.epoch_train_loss = (
                                                         1. - conf.loss_decay) * self.epoch_train_loss + conf.loss_decay * temp_loss
 
+                # no need to do backward propagation for getting representation only
+                if get_projection:
+                    self.completed_steps += 1
+                    if self.completed_steps == target_steps:
+                        break
+                    else:
+                        continue
+                
                 # ========= Define the backward loss ==============
-                optimizer.zero_grad()
+                if not skip_optimizer_step:
+                    optimizer.zero_grad()
                 loss.backward()
-                optimizer.step()
+                if not skip_optimizer_step:
+                    optimizer.step()
 
-                # ========= Weight handler ========================
-                self.optimizer.update_client_weight(
-                    conf, model, self.global_model if self.global_model is not None else None)
+                    # ========= Weight handler ========================
+                    self.optimizer.update_client_weight(
+                        conf, model, self.global_model if self.global_model is not None else None)
             except Exception as ex:
                 logging.info(f"Training of (CLIENT: {conf.client_id}) failed as {ex}, skip")
 
@@ -281,6 +317,17 @@ class TorchClient(ClientBase):
             # logging.info(f"Training of (CLIENT: {conf.client_id}) completes {self.completed_steps} steps")
 
             if self.completed_steps == target_steps:
+                if skip_optimizer_step:
+                    try:
+                        # extract FC gradients
+                        self.accumulate_gradient = {"fc.weight.grad": model.fc.weight.grad.data.clone()}
+                    except:
+                        self.accumulate_gradient = {"output.weight.grad": model.output.weight.grad.data.clone()}
+
+                    # zeroed out the gradient of model
+                    model.zero_grad()
+
+                    logging.info(f"accumulate gradient for {conf.client_id} with {len(self.accumulate_gradient.keys())} parameters, norm {torch.norm(torch.cat([p.view(-1) for p in self.accumulate_gradient.values()]))}")
                 break
             
         trainRes = {'top_1': self.correct, 'top_5': self.top_5, 'train_len': self.train_len, 'train_labels': self.train_labels}
