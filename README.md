@@ -1,3 +1,5 @@
+This anonymous code repository as also available [online](https://anonymous.4open.science/r/FIELDING-B8CF) 
+
 This system prototype is developed atop FedScale ([fedscale.ai](https://fedscale.ai/)), which provides high-level APIs to implement FL algorithms, deploy and evaluate them at scale across diverse hardware and software backends. 
 FedScale also includes the largest FL benchmark that contains FL tasks ranging from image classification and object detection to language modeling and speech recognition. 
 Moreover, it provides datasets to faithfully emulate FL training environments where FL will realistically be deployed.
@@ -13,13 +15,15 @@ If you have [Anaconda](https://www.anaconda.com/products/distribution#download-s
 # Please replace ~/.bashrc with ~/.bash_profile for MacOS
 FEDSCALE_HOME=$(pwd)
 echo export FEDSCALE_HOME=$(pwd) >> ~/.bashrc 
-echo alias fedscale=\'bash $FEDSCALE_HOME/fedscale.sh\' >> ~/.bashrc 
+echo alias fedscale='bash $FEDSCALE_HOME/fedscale.sh' >> ~/.bashrc 
 conda init bash
 . ~/.bashrc
 
 conda env create -f environment.yml
 conda activate fedscale
 pip install -e .
+pip install pyclustering
+pip install numpy==1.23.5
 ```
 
 Please install NVIDIA [CUDA 10.2](https://developer.nvidia.com/cuda-downloads) or above.
