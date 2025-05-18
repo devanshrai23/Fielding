@@ -58,6 +58,7 @@ parser.add_argument('--base_delta', type=float, default=0.1)
 # For gradient and embedding based clustering
 parser.add_argument('--use_gradient_cluster', type=bool, default=False)
 parser.add_argument('--get_projection', type=bool, default=False)
+parser.add_argument('--embedding_model', type=str, default='resnet18_nobn')
 parser.add_argument('--representation_model', type=str, default='./workspace/checkpoint/')
 # For robustness analysis
 parser.add_argument('--malicious_ratio', type=float, default=0)

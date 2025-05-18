@@ -65,6 +65,7 @@ class ClientManager:
         self.fast_clients = {}
         self.slow_clients = {}
         self.client_rank_to_utility = {}
+        self.delete_small_cluster = True
 
         self.ucb_sampler = None
 
@@ -306,8 +307,15 @@ class ClientManager:
             else:
                 self.client_rank_to_utility[client_id] = reward
 
+        if new_weight is not None:
+            self.client_metadata[self.getUniqueId(0, client_id)].register_gradient(new_weight)
+            logging.info(f"register client {client_id} gradient")
+            self.clients_with_gradient.add(client_id)
         if top1_accu is not None:
             self.client_metadata[self.getUniqueId(0, client_id)].register_accuracy(top1_accu, top5_accu)
+        if representation is not None:
+            self.client_metadata[self.getUniqueId(0, client_id)].register_representation(representation)
+            logging.info(f"register client {client_id} representation")
 
     def register_data_drifted_client(self, client_id, cluster_id = 0, recalculate_distance = False):
         if cluster_id not in self.data_drifted_clients:
@@ -403,6 +411,7 @@ class ClientManager:
         else:
             all_clients_to_cluster = all_clients
         # remove unavailable clients
+        logging.info(f"In global_clustering, all_clients_to_cluster has {len(all_clients_to_cluster)} clients")
         distribution_prob = {}
         for client_id in all_clients_to_cluster:
             client_label_counts = self.client_metadata[self.getUniqueId(0, client_id)].label_distribution
@@ -801,7 +810,7 @@ class ClientManager:
 
         need_global_recluster = True
         
-        if increment and (not self.args.local_embedding_cluster):
+        if increment:
             # reuse the need_gradient_based_global_recluster function, 
             # except that we use representation instead of jl-transformed gradient
             need_global_recluster = self.need_gradient_based_global_recluster(\
@@ -819,8 +828,7 @@ class ClientManager:
                 logging.info(f"optimal kmeans_clusters: {k_clusters}")
                 initial_centers = kmeans_plusplus_initializer(A, k_clusters).initialize()
                 # Create instance of K-Means algorithm with prepared centers.
-                kmeans_instance = kmeans(A, initial_centers, metric=self.embedding_average_linkage \
-                                        if self.args.local_embedding_cluster else self.euclidean_square)
+                kmeans_instance = kmeans(A, initial_centers, metric=self.euclidean_square)
                 # Run cluster analysis and obtain results.
                 kmeans_instance.process()
                 kclusters = kmeans_instance.get_clusters()
@@ -836,7 +844,7 @@ class ClientManager:
                     current_clusters[i+1].append(all_clients[idx])
             logging.info(f"k clusters: {[(k, len(v)) for k, v in current_clusters.items()]}")
             
-            if delete_small_cluster and (not self.args.local_embedding_cluster):
+            if delete_small_cluster:
                 # delete small clusters
                 current_clusters = self.cluster_manager.move_clients_by_gain(
                     clustered_client_features, current_clusters, ksearch_type="kmeans")

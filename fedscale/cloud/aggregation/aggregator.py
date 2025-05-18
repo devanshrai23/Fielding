@@ -1617,7 +1617,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
                 self.global_round += 1
                 for i in range(0, self.num_cluster+1):
                     self.round_completion_handler(cluster_id=i)
-                    if len(self.new_cluster_mapping) > 0:
+                    if len(self.new_cluster_mapping) > 0 or self.getting_global_gradient:
                         # just globally reclustered, old clusters don't need to proceed training
                         break
                 logging.info(f"Coordinator time cost (select+create_task+recluster): {time.time() - coordinator_start_time} s")

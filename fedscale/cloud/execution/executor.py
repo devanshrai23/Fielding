@@ -506,7 +506,7 @@ class Executor(object):
                 current_event = request.event
                 event_type, cluster_id = commons.decode_clusterid(current_event)
 
-                if event_type == commons.CLIENT_TRAIN:
+                if event_type == commons.CLIENT_TRAIN or event_type == commons.GLOBAL_GRADIENT:
                     train_config = self.deserialize_response(request.meta)
                     train_model = self.deserialize_response(request.data)
                     train_config['model'] = train_model
