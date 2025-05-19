@@ -80,7 +80,14 @@ cd workspace/scripts/data_prepare
 python3 prepare_cityscape_datasets.py
 ```
 #### Waymo Open
-Download the [Ekya](https://github.com/edge-video-services/ekya) preprocessed Waymo dataset from [here](https://drive.google.com/drive/u/1/folders/1dJjnrHfV86eYB4nuMFrNU_kPUzzSknXb) and extract into `$FEDSCALE_HOME/benchmark/dataset/data/waymo_classified` (If you prefer extracting the data to a different directory, please update `benckmark/configs/waymo_classified/waymo_classified.yml` accordingly).
+Download the [Ekya](https://github.com/edge-video-services/ekya) preprocessed Waymo dataset (waymo_classification_images.tar) from [here](https://drive.google.com/drive/u/1/folders/1dJjnrHfV86eYB4nuMFrNU_kPUzzSknXb) and extract into `$FEDSCALE_HOME/benchmark/dataset/data/waymo_classified` (If you prefer extracting the data to a different directory, please update `benckmark/configs/waymo_classified/waymo_classified.yml` accordingly).
+```
+cd benchmark/dataset/data
+gdown https://drive.google.com/uc?id=1jAI25zLO_H4UwKFR72gejX7AR1-_NczV
+tar -xf waymo_classification_images.tar -C waymo_classified
+cd waymo_classified
+mv waymo_classification_images/* .
+```
 
 #### Open Images
 Download the data directly from [FedScale Datasets](https://fedscale.ai/docs/dataset) with the following command

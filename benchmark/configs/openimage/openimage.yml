@@ -59,7 +59,7 @@ job_conf:
     - save_checkpoint: True
     - sample_mode: random
     - data_mode: sliding_window_cumulate
-    - wandb_token: [Your_Wandb_Token]
+    # - wandb_token: [Your_Wandb_Token] # Enable to use wandb
     - split_round: 1
     - adjust_cluster_selected_num: True
     - max_cluster_size_ratio: 0.95
