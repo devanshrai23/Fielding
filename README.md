@@ -20,7 +20,7 @@ conda init bash
 . ~/.bashrc
 
 conda env create -f environment.yml
-conda activate fedscale
+conda activate fedscale_open
 pip install -e .
 pip install pyclustering
 pip install numpy==1.23.5
