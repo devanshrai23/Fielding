@@ -50,12 +50,18 @@ Repo Root
 ```
 ## Preparing datasets
 
+### Access Device info
+Download the `device_info.zip` from our [asset Google Drive](https://drive.google.com/drive/folders/1KzyvdQzZh2ruRNv9X3vwnbG0v8x_OGWT?usp=sharing) and place the extracted `device_info` folder under `$FEDSCALE_HOME/benchmark/dataset/data/`.
+
 ### Access trained models for getting embeddings or gradients as client representations
 
 Download the `checkpoint` folder from our [asset Google Drive](https://drive.google.com/drive/folders/1KzyvdQzZh2ruRNv9X3vwnbG0v8x_OGWT?usp=sharing) and place it under `workspace`.
 
 ### Download datasets
 #### Functional Map of the World (fMoW) Dataset
+##### Download the prepared dataset
+Download the `fMoW_data.zip` from our [asset Google Drive](https://drive.google.com/drive/folders/1KzyvdQzZh2ruRNv9X3vwnbG0v8x_OGWT?usp=sharing).
+##### Alternatively, you can start from scratch
 The original dataset repo is at [Functional Map of the World (fMoW) Dataset](https://github.com/fMoW/dataset). 
 ```
 cd [path_to_your_preferred_dataset_directory (by default it would be "/data")]
