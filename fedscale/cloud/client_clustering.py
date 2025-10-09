@@ -322,7 +322,8 @@ class ClusterManager:
             num_cluster = 0
             start_num_cluster = max(self.args.min_num_cluster, self.find_optimal_cluster_numbers(A, ksearch_type="kmeans"))
             max_cluster_size = len(A)
-            while num_cluster < start_num_cluster or max_cluster_size > len(A) * self.args.max_cluster_size_ratio:
+            retry = 0
+            while (num_cluster < start_num_cluster or max_cluster_size > len(A) * self.args.max_cluster_size_ratio) and retry < 100:
                 # reuse existing cluster centers if we have enough
                 if len(current_clusters) == start_num_cluster:
                     initial_centers = np.array([cluster_to_center[cid] for cid in \
@@ -339,13 +340,15 @@ class ClusterManager:
                 num_cluster = len(kclusters)
                 max_cluster_size = max([len(v) for v in kclusters])
                 logging.info(f"start_num_cluster: {start_num_cluster}, num_cluster: {num_cluster}, max_cluster_size: {max_cluster_size}")
+                retry += 1
         else:
+            retry = 0
             # use kmedians
             # start with 10 k-median clusters
             num_cluster = 0
             start_num_cluster = max(self.args.min_num_cluster, self.find_optimal_cluster_numbers(A, ksearch_type="kmedians"))
             max_cluster_size = len(A)
-            while num_cluster < start_num_cluster or max_cluster_size > len(A) * self.args.max_cluster_size_ratio:
+            while (num_cluster < start_num_cluster or max_cluster_size > len(A) * self.args.max_cluster_size_ratio) and retry < 100:
                 initial_medians = A[np.random.permutation(A.shape[0])[:start_num_cluster],:]
                 kmedians_instance = kmedians(A, initial_medians)
                 kmedians_instance.process()
@@ -353,6 +356,7 @@ class ClusterManager:
                 num_cluster = len(kclusters)
                 max_cluster_size = max([len(v) for v in kclusters])
                 logging.info(f"start_num_cluster: {start_num_cluster}, num_cluster: {num_cluster}, max_cluster_size: {max_cluster_size}")
+                retry += 1
             
         # if any cluster's size is > 1/2 of the total clients, redo clustering for the clients not in the largest cluster
         largest_cluster_size = 0

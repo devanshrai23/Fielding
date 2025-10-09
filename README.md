@@ -1,4 +1,4 @@
-This anonymous code repository as also available [online](https://anonymous.4open.science/r/FIELDING-B8CF) 
+This anonymous code repository as also available [online](https://anonymous.4open.science/r/AISTATS-A7B9) 
 
 This system prototype is developed atop FedScale ([fedscale.ai](https://fedscale.ai/)), which provides high-level APIs to implement FL algorithms, deploy and evaluate them at scale across diverse hardware and software backends. 
 FedScale also includes the largest FL benchmark that contains FL tasks ranging from image classification and object detection to language modeling and speech recognition. 
