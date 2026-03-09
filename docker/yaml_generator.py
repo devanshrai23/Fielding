@@ -112,7 +112,3 @@ def generate_exec_template(dict, path):
             return config
         except:
             sys.exit("Generated YAML is not valid, aborting...")
-
-# if __name__ == "__main__":
-#     generate_aggr_template({"pod_name": "fedscale-aggr-pod", "data_path": "/users/yilegu/benchmark"}, "generated_aggr.yaml")
-#     generate_exec_template({"pod_name": "fedscale-exec-pod", "data_path": "/users/yilegu/benchmark"}, "generated_exec.yaml")

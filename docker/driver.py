@@ -3,7 +3,6 @@
 import datetime
 import os
 import pickle
-import random
 import shlex
 import subprocess
 import sys
@@ -12,6 +11,7 @@ import json
 from typing import Dict
 import yaml
 import socket
+import ast
 
 from kubernetes import client, config, utils
 from yaml_generator import generate_aggr_template, generate_exec_template
@@ -65,7 +65,7 @@ def process_cmd(yaml_file, local=False):
         for ip_gpu in yaml_conf['worker_ips']:
             ip, gpu_list = ip_gpu.strip().split(':')
             worker_ips.append(ip)
-            total_gpus.append(eval(gpu_list))
+            total_gpus.append(ast.literal_eval(gpu_list))
 
     time_stamp = datetime.datetime.fromtimestamp(
         time.time()).strftime('%m%d_%H%M%S')
