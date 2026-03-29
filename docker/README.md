@@ -88,7 +88,7 @@ To allow docker containers running in different host machines to communicate wit
 	# configure host1 as the master, this will return a join command for workers
 	host1$ docker swarm init --advertise-addr $HOST1_LOCAL_IP --listen-addr $HOST1_LOCAL_IP:6666
 	# configure host2 as the worker, using command generated from host1's swarm init
-	docker swarm join --token SWMTKN-1-4d61y6l7dgw7cycz5wxyabfg6ew5q6qgeb1fgqfas2pba1jspj-3d8ph41e33q2bb0uixaht1eft $HOST1_LOCAL_IP:6666
+	docker swarm join --token SWMTKN-1-<your_token_here> $HOST1_LOCAL_IP:6666
 	```
 	
 - Create an overlay network for container communications
