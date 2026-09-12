@@ -563,7 +563,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
                 self.client_training_results[cluster_id].append(results)
             # Feed metrics to client sampler
             logging.info("In round: {} (cluster {}), client_id: {}, moving_loss: {}, avg moving_loss: {}, utility: {}, train_info (top 1, top 5, trained_size): ({},{},{})".format(\
-                self.round[cluster_id], cluster_id, results['client_id'], results['moving_loss'], float(results['moving_loss'])/float(results['trained_size']) , results['utility'], \
+                self.round[cluster_id], cluster_id, results['client_id'], results['moving_loss'], float(results['moving_loss'])/max(1.0, float(results['trained_size'])) , results['utility'], \
                 results['top_1'], results['top_5'], results['trained_size']))
             self.stats_util_accumulator[cluster_id].append(results['utility'])
             self.loss_accumulator[cluster_id].append(results['moving_loss'])
