@@ -1,0 +1,83 @@
+# Configuration file of FAR training experiment
+
+# ========== Cluster configuration ========== 
+# ip address of the parameter server (need 1 GPU process)
+ps_ip: localhost
+
+# ip address of each worker:# of available gpus process on each gpu in this node
+# Note that if we collocate ps and worker on same GPU, then we need to decrease this number of available processes on that GPU by 1
+# E.g., master node has 4 available processes, then 1 for the ps, and worker should be set to: worker:3
+worker_ips:
+    - localhost:[10,0]
+
+exp_path: $FEDSCALE_HOME/fedscale/cloud
+
+# Entry function of executor and aggregator under $exp_path
+executor_entry: execution/executor.py
+
+aggregator_entry: aggregation/aggregator.py
+
+auth:
+    ssh_user: ""
+    ssh_private_key: ~/.ssh/id_ed25519
+
+setup_commands:
+    - source $HOME/miniconda3/bin/activate fedscale
+
+# ========== Additional job configuration ========== 
+# Default parameters are specified in config_parser.py, wherein more description of the parameter can be found
+
+job_conf: 
+    - job_name: fmow_fast                   # Generate logs under this folder: log_path/job_name/time_stamp
+    - log_path: $FEDSCALE_HOME/benchmark/fmow
+    - num_participants: 20                      # auxo setting, Number of participants per round, we use K=100 in our paper, large K will be much slower
+    - data_set: fmow                     # Dataset: openImg, google_speech, stackoverflow
+    - data_dir: $FEDSCALE_HOME/benchmark/dataset/data/fmow    # Path of the dataset
+    - data_map_file: $FEDSCALE_HOME/benchmark/dataset/data/fmow/client_data_mapping/train.csv              # Allocation of data to each client, turn to iid setting if not provided
+    - test_data_map_file: $FEDSCALE_HOME/benchmark/dataset/data/fmow/client_data_mapping/test.csv
+    - data_frame_file: $FEDSCALE_HOME/benchmark/dataset/data/fmow/client_data_mapping/train_data_frame.pkl
+    - test_data_frame_file: $FEDSCALE_HOME/benchmark/dataset/data/fmow/client_data_mapping/test_data_frame.pkl
+    - client_start_end_rounds_file: $FEDSCALE_HOME/workspace/records/fmow/client_rank_2_start_end_round.pkl
+    - device_conf_file: $FEDSCALE_HOME/benchmark/dataset/data/device_info/client_device_capacity     # Path of the client trace
+    - model: resnet18
+    - model_zoo: fedscale-torch-zoo
+    - pretrained: True
+    - gradient_policy: fed-prox                 # {"fed-yogi", "fed-prox", "fed-avg"}, "fed-avg" by default
+    - eval_interval: 25                     # How many rounds to run a testing on the testing set
+    - rounds: 500                           # Number of rounds to run this training
+    - filter_less: 11                       # Remove clients w/ less than 11 samples
+    - num_loaders: 2
+    - yogi_eta: 3e-3 
+    - yogi_tau: 1e-6
+    - yogi_beta: 0.9
+    - yogi_beta2: 0.99
+    - qfed_q: 1e-8
+    - local_steps: 10
+    - learning_rate: 0.05
+    - min_learning_rate: 0.000001
+    - batch_size: 20
+    - test_bsz: 128
+    - cuda_device: cuda:0
+    - save_checkpoint: True
+    - sample_mode: random
+    - data_mode: sliding_window_cumulate
+    # - wandb_token: [Your_Wandb_Token] # Enable to use wandb
+    - split_round: 1
+    - adjust_cluster_selected_num: True
+    - max_cluster_size_ratio: 0.95
+    - recluster_at_drift: True
+    - proxy_mu: 0.1
+    - dump_per_client_accuracy: True
+    - round_time_limit: 1200 # 20 minutes
+    - ps_port: 7100
+    - use_l1_distance: True # use l1 distance to calculate the distance between two distribution vectors (disable this if you want to use Jensen–Shannon distance)
+    # Enable the following two lines to trigger global reclustering based on pairwise distance
+    # - use_pairwise_delta_threshold: True
+    # - base_delta: 0.1
+    # Enable the following two lines to use gradient based clustering with shared model
+    # - use_gradient_cluster: True
+    # - embedding_model: resnet18_nobn
+    # Enable the following two lines together with the two lines above to use embedding based clustering with pre-trained model
+    # - representation_model: $FEDSCALE_HOME/workspace/checkpoint/fmow/model_resnet18_cluster0.pth 
+    # - get_projection: True
+
