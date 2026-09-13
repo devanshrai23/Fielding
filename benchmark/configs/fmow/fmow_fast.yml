@@ -8,7 +8,7 @@ ps_ip: localhost
 # Note that if we collocate ps and worker on same GPU, then we need to decrease this number of available processes on that GPU by 1
 # E.g., master node has 4 available processes, then 1 for the ps, and worker should be set to: worker:3
 worker_ips:
-    - localhost:[10,0]
+    - localhost:[4,0]
 
 exp_path: ./fedscale/cloud
 
@@ -56,7 +56,7 @@ job_conf:
     - learning_rate: 0.05
     - min_learning_rate: 0.000001
     - batch_size: 20
-    - test_bsz: 128
+    - test_bsz: 64
     - cuda_device: cuda:0
     - save_checkpoint: True
     - sample_mode: random
