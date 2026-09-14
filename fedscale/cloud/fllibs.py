@@ -304,9 +304,9 @@ def init_dataset():
             train_transform, test_transform = get_data_transform(parser.args.data_set)
             logging.info("Transforms loaded ...")
             train_dataset = FMoW(
-                parser.args.data_dir, img_root='/data/fMoW/train_cropped', dataset='train', transform=train_transform)
+                parser.args.data_dir, img_root=os.path.join(parser.args.data_dir, 'train_cropped'), dataset='train', transform=train_transform)
             test_dataset = FMoW(
-                parser.args.data_dir, img_root='/data/fMoW/train_cropped', dataset='test', transform=test_transform)
+                parser.args.data_dir, img_root=os.path.join(parser.args.data_dir, 'train_cropped'), dataset='test', transform=test_transform)
         
         elif parser.args.data_set == "waymo_classified":
             from fedscale.dataloaders.core50 import CORE50
