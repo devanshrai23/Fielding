@@ -1110,6 +1110,7 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
         """
         # dump record
         if self.args.dump_per_client_accuracy:
+            os.makedirs(f"./workspace/records/{self.args.job_name}/per_client_accuracy", exist_ok=True)
             with open(f"./workspace/records/{self.args.job_name}/per_client_accuracy/{self.args.time_stamp}.pkl", 'ab+') as f:
                 pickle.dump(self.per_client_test_top1, f)
         if self.wandb != None:
