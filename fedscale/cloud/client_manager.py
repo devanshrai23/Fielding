@@ -1118,10 +1118,75 @@ class ClientManager:
         for k, v in self.data_drifted_clients.items():
             if len(v) > 0:
                 drifted_clients.update(v)
+
         return drifted_clients
+
+    def _check_model_impact(self):
+        if getattr(self.args, 'model_impact_aware_reclustering', False) == False:
+            return True
+
+        if not hasattr(self, 'model_impact_checks'):
+            self.model_impact_checks = 0
+            self.model_impact_significant_events = 0
+            self.model_impact_insignificant_events = 0
+            self.model_impact_unavailable_events = 0
+            self.total_data_drift_events = 0
+            self.reclusterings_triggered = 0
+            self.reclusterings_skipped_due_to_low_model_impact = 0
+
+        self.total_data_drift_events += 1
+        self.model_impact_checks += 1
+
+        drifted_clients = self.getDriftedClients()
+        impacts = []
+        for client_id in drifted_clients:
+            metadata = self.client_metadata[self.getUniqueId(0, client_id)]
+            accuracies = metadata.top1_accuracies
+            if len(accuracies) >= 2:
+                prev_acc = accuracies[-2]
+                curr_acc = accuracies[-1]
+                impact = max(0, prev_acc - curr_acc)
+                impacts.append(impact)
+
+        cluster_id_str = ",".join(map(str, self.data_drifted_clients.keys()))
+
+        if len(impacts) == 0:
+            self.model_impact_unavailable_events += 1
+            self.reclusterings_triggered += 1
+            logging.info(f"MODEL_IMPACT_CHECK: cluster_id={cluster_id_str} drifted_clients={len(drifted_clients)} valid_accuracy_clients=0 avg_model_impact=N/A max_model_impact=N/A threshold={self.args.model_impact_threshold} decision=FALLBACK_ORIGINAL_NO_MODEL_IMPACT_DATA")
+            return True
+
+        avg_impact = sum(impacts) / len(impacts)
+        max_impact = max(impacts)
+
+        is_significant = avg_impact >= self.args.model_impact_threshold
+
+        if is_significant:
+            self.model_impact_significant_events += 1
+            self.reclusterings_triggered += 1
+            decision = "RECLUSTER"
+        else:
+            self.model_impact_insignificant_events += 1
+            self.reclusterings_skipped_due_to_low_model_impact += 1
+            decision = "SKIP_LOW_MODEL_IMPACT"
+            self.data_drifted_clients = {}
+
+        logging.info(f"MODEL_IMPACT_CHECK: cluster_id={cluster_id_str} drifted_clients={len(drifted_clients)} valid_accuracy_clients={len(impacts)} avg_model_impact={avg_impact:.4f} max_model_impact={max_impact:.4f} threshold={self.args.model_impact_threshold} model_impact_significant={is_significant} final_recluster_decision={decision}")
+
+        return is_significant
+
     
     def clientReclusterAllGradientBased(self, device, clusters=[0], use_global_model=False, curr_round=0, default_global_recluster=False):
         logging.info(f"reclustering clusters using gradient {clusters}")
+
+        if not self.hasDriftedClients():
+            logging.info("no clients drifted, skip reclustering")
+            return {}
+
+        if not self._check_model_impact():
+            logging.info("model impact insignificant, skip reclustering")
+            self.data_drifted_clients = {}
+            return {}
 
         prev_cluster_to_center = copy.deepcopy(self.cluster_to_center)
         prev_max_cluster_id = max(prev_cluster_to_center.keys())
@@ -1175,6 +1240,15 @@ class ClientManager:
     
     def clientReclusterAllRepresentationBased(self, device, clusters=[0], use_global_model=False, curr_round=0, default_global_recluster=False):
         logging.info(f"reclustering clusters using representation {clusters}")
+
+        if not self.hasDriftedClients():
+            logging.info("no clients drifted, skip reclustering")
+            return {}
+
+        if not self._check_model_impact():
+            logging.info("model impact insignificant, skip reclustering")
+            self.data_drifted_clients = {}
+            return {}
 
         prev_cluster_to_center = copy.deepcopy(self.cluster_to_center)
         prev_max_cluster_id = max(prev_cluster_to_center.keys())
@@ -1239,6 +1313,11 @@ class ClientManager:
             logging.info(f"no clients drifted, skip reclustering")
             return {}, False
         
+
+        if not self._check_model_impact():
+            logging.info("model impact insignificant, skip reclustering")
+            self.data_drifted_clients = {}
+            return {}, False
         prev_cluster_to_center = copy.deepcopy(self.cluster_to_center)
         logging.info(f"prev_cluster_to_center: {prev_cluster_to_center}")
         shifted_cluster = set()
@@ -1586,3 +1665,12 @@ class ClientManager:
         if self.mode == 'oort':
             return self.ucb_sampler[cluster_id].get_median_reward()
         return 0.
+
+
+
+
+
+
+
+
+

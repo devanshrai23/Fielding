@@ -9,6 +9,10 @@ parser.add_argument('--log_path', type=str, default='./',
 parser.add_argument('--wandb_token', type=str, default="",
                     help="API key for wandb as login credentials")
 
+parser.add_argument('--model_impact_aware_reclustering', type=bool, default=False, help='Whether to check model impact before reclustering')
+parser.add_argument('--model_impact_threshold', type=float, default=0.05, help='Threshold for model impact before reclustering')
+parser.add_argument('--model_impact_smoothing', type=bool, default=False, help='Whether to use smoothing for model impact')
+
 # The basic configuration of the cluster
 parser.add_argument('--ps_ip', type=str, default='127.0.0.1')
 parser.add_argument('--ps_port', type=str, default='29500')

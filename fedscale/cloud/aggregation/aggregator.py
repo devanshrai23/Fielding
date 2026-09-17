@@ -909,6 +909,9 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
             if self.round[cluster_id] >= self.args.rounds:
                 logging.info(f"Cluster {cluster_id} about to exit")
                 if cluster_id == self.num_cluster or (cluster_id == 0 and self.num_cluster == 0):
+                    
+                    if hasattr(self.client_manager, 'model_impact_checks'):
+                        logging.info(f"MODEL_IMPACT_SUMMARY\n        data_drift_events={self.client_manager.total_data_drift_events}\n        model_impact_checks={self.client_manager.model_impact_checks}\n        significant_model_impact={self.client_manager.model_impact_significant_events}\n        insignificant_model_impact={self.client_manager.model_impact_insignificant_events}\n        unavailable_model_impact={self.client_manager.model_impact_unavailable_events}\n        reclusterings={self.client_manager.reclusterings_triggered}\n        skipped_reclusterings={self.client_manager.reclusterings_skipped_due_to_low_model_impact}")
                     # shutdown when all clusters have finished
                     self.broadcast_aggregator_events(commons.encode_clusterid(commons.SHUT_DOWN))
                 return
@@ -1057,6 +1060,10 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
                 self.curr_round_start_time = time.time()
 
         elif self.use_gradient_cluster and cluster_id == 0 and self.client_manager.hasDriftedClients():
+            if not self.client_manager._check_model_impact():
+                self.client_manager.data_drifted_clients = {}
+                self.broadcast_aggregator_events(commons.encode_clusterid(commons.START_ROUND, cluster_id))
+                return
             self.init_cluster_tasks(cluster_id, get_global_gradient=True)
             self.getting_global_gradient = True
             self.global_gradient_complete = 0
@@ -1744,3 +1751,6 @@ class Aggregator(job_api_pb2_grpc.JobServiceServicer):
 if __name__ == "__main__":
     aggregator = Aggregator(parser.args)
     aggregator.run()
+
+
+
