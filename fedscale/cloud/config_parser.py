@@ -12,6 +12,7 @@ parser.add_argument('--wandb_token', type=str, default="",
 parser.add_argument('--model_impact_aware_reclustering', type=bool, default=False, help='Whether to check model impact before reclustering')
 parser.add_argument('--model_impact_threshold', type=float, default=0.05, help='Threshold for model impact before reclustering')
 parser.add_argument('--model_impact_smoothing', type=bool, default=False, help='Whether to use smoothing for model impact')
+parser.add_argument('--model_impact_smoothing_window', type=int, default=3, help='Window size for model impact smoothing')
 
 # The basic configuration of the cluster
 parser.add_argument('--ps_ip', type=str, default='127.0.0.1')
