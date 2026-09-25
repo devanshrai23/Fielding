@@ -935,6 +935,34 @@ insufficient_history_events: {self.client_manager.insufficient_history_events if
 unavailable_model_impact_events: {self.client_manager.model_impact_unavailable_events}
 """
                         logging.info(summary_msg)
+
+                        # TEMPORAL EPSILON SUMMARY
+                        temporal_enabled = getattr(self.args, 'temporal_epsilon_reclustering', False)
+                        if temporal_enabled and hasattr(self.client_manager, 'temporal_eval_count'):
+                            import numpy as np
+                            all_d = self.client_manager.all_deltas
+                            all_e = self.client_manager.all_epsilons
+                            avg_delta = np.mean(all_d) if len(all_d)>0 else 0
+                            med_delta = np.median(all_d) if len(all_d)>0 else 0
+                            avg_eps = np.mean(all_e) if len(all_e)>0 else 0
+                            med_eps = np.median(all_e) if len(all_e)>0 else 0
+                            
+                            t_summary_msg = f"""TEMPORAL EPSILON SUMMARY
+
+temporal_epsilon_checks: {self.client_manager.temporal_checks}
+temporal_epsilon_warmups: {self.client_manager.temporal_warmups}
+significant_temporal_state_changes: {self.client_manager.temporal_significant}
+insignificant_temporal_state_changes: {self.client_manager.temporal_insignificant}
+reclusterings: {self.client_manager.reclusterings_triggered}
+skipped_reclusterings: {self.client_manager.reclusterings_skipped_due_to_low_model_impact}
+reclusterings_avoided_by_temporal_epsilon: {self.client_manager.temporal_reclusterings_avoided}
+average_delta: {avg_delta:.4f}
+median_delta: {med_delta:.4f}
+average_epsilon: {avg_eps:.4f}
+median_epsilon: {med_eps:.4f}
+clients_epsilon_active: {self.client_manager.temporal_active_clients}
+"""
+                            logging.info(t_summary_msg)
                     # shutdown when all clusters have finished
                     self.broadcast_aggregator_events(commons.encode_clusterid(commons.SHUT_DOWN))
                 return

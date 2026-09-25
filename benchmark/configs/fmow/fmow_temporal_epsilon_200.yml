@@ -1,0 +1,80 @@
+﻿# Configuration file of FAR training experiment
+
+# ========== Cluster configuration ========== 
+# ip address of the parameter server (need 1 GPU process)
+ps_ip: localhost
+
+# ip address of each worker:# of available gpus process on each gpu in this node
+# Note that if we collocate ps and worker on same GPU, then we need to decrease this number of available processes on that GPU by 1
+# E.g., master node has 4 available processes, then 1 for the ps, and worker should be set to: worker:3
+worker_ips:
+    - localhost:[4,0]
+
+exp_path: ./fedscale/cloud
+
+# Entry function of executor and aggregator under $exp_path
+executor_entry: execution/executor.py
+
+aggregator_entry: aggregation/aggregator.py
+
+auth:
+    ssh_user: ""
+    ssh_private_key: ~/.ssh/id_ed25519
+
+setup_commands:
+    - source $HOME/miniconda3/bin/activate fedscale
+
+# ========== Additional job configuration ========== 
+# Default parameters are specified in config_parser.py, wherein more description of the parameter can be found
+
+job_conf: 
+    - job_name: fmow_temporal_epsilon_200
+    - log_path: ./benchmark/fmow
+    - num_participants: 10
+    - data_set: fmow
+    - data_dir: ./benchmark/dataset/data/fmow
+    - data_map_file: ./benchmark/dataset/data/fmow/client_data_mapping/train.csv
+    - test_data_map_file: ./benchmark/dataset/data/fmow/client_data_mapping/test.csv
+    - data_frame_file: ./benchmark/dataset/data/fmow/client_data_mapping/train_data_frame.pkl
+    - test_data_frame_file: ./benchmark/dataset/data/fmow/client_data_mapping/test_data_frame.pkl
+    - client_start_end_rounds_file: ./workspace/records/fmow/client_rank_2_start_end_round.pkl
+    - device_conf_file: ./benchmark/dataset/data/device_info/client_device_capacity
+    - model: resnet18
+    - model_zoo: fedscale-torch-zoo
+    - pretrained: True
+    - gradient_policy: fed-prox
+    - eval_interval: 5
+    - rounds: 200
+    - filter_less: 11
+    - num_loaders: 2
+    - yogi_eta: 3e-3 
+    - yogi_tau: 1e-6
+    - yogi_beta: 0.9
+    - yogi_beta2: 0.99
+    - qfed_q: 1e-8
+    - local_steps: 10
+    - learning_rate: 0.05
+    - min_learning_rate: 0.000001
+    - batch_size: 20
+    - test_bsz: 64
+    - model_impact_aware_reclustering: True
+    - model_impact_threshold: 0.05
+    - model_impact_smoothing: False
+    - temporal_epsilon_reclustering: True
+    - temporal_epsilon_window: 50
+    - epsilon_percentile: 95
+    - persistence_window: 5
+    - persistence_threshold: 0.8
+    - cuda_device: cuda:0
+    - save_checkpoint: True
+    - sample_mode: random
+    - data_mode: sliding_window_cumulate
+    - split_round: 1
+    - adjust_cluster_selected_num: True
+    - max_cluster_size_ratio: 0.95
+    - recluster_at_drift: True
+    - proxy_mu: 0.1
+    - dump_per_client_accuracy: True
+    - round_time_limit: 1200
+    - ps_port: 7100
+    - use_l1_distance: True

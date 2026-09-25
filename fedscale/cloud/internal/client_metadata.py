@@ -60,6 +60,7 @@ class ClientMetadata:
             self.top5_accuracies.append(top5)
 
     def register_distribution(self, distribution):
+        self.prev_label_distribution = getattr(self, 'label_distribution', None)
         self.label_distribution = distribution
 
     def is_active(self, cur_time):

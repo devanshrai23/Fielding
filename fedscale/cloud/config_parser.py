@@ -14,6 +14,12 @@ parser.add_argument('--model_impact_threshold', type=float, default=0.05, help='
 parser.add_argument('--model_impact_smoothing', type=bool, default=False, help='Whether to use smoothing for model impact')
 parser.add_argument('--model_impact_smoothing_window', type=int, default=3, help='Window size for model impact smoothing')
 
+parser.add_argument('--temporal_epsilon_reclustering', type=bool, default=False, help='Enable temporal epsilon check')
+parser.add_argument('--temporal_epsilon_window', type=int, default=50, help='Rolling history window size for epsilon')
+parser.add_argument('--persistence_window', type=int, default=5, help='Window for calculating drift persistence')
+parser.add_argument('--persistence_threshold', type=float, default=0.8, help='Threshold for drift persistence')
+parser.add_argument('--epsilon_percentile', type=int, default=95, help='Percentile for epsilon calculation')
+
 # The basic configuration of the cluster
 parser.add_argument('--ps_ip', type=str, default='127.0.0.1')
 parser.add_argument('--ps_port', type=str, default='29500')
