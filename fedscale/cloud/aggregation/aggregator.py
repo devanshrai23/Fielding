@@ -1171,76 +1171,85 @@ clients_epsilon_active: {self.client_manager.temporal_active_clients}
             os.makedirs(f"./workspace/records/{self.args.job_name}/per_client_accuracy", exist_ok=True)
             with open(f"./workspace/records/{self.args.job_name}/per_client_accuracy/{self.args.time_stamp}.pkl", 'ab+') as f:
                 pickle.dump(self.per_client_test_top1, f)
-        if self.wandb != None:
-            # log all clients test result
-            # log the mean and median accuracy of clients on the global model
+
+        # log all clients test result
+        # log the mean and median accuracy of clients on the global model
+        if len(self.per_client_test_top1) > 0 and len(self.per_client_test_top1[0]) > 0:
             mean_per_client_top1_accuracy_on_global_model = np.mean([x[1] for x in self.per_client_test_top1[0]])
             median_per_client_top1_accuracy_on_global_model = np.median([x[1] for x in self.per_client_test_top1[0]])
+        else:
+            mean_per_client_top1_accuracy_on_global_model = 0.0
+            median_per_client_top1_accuracy_on_global_model = 0.0
+
+        if self.wandb != None:
             self.wandb.log({
                 'Test/all_clients_mean_top1_accuracy_on_global_model': mean_per_client_top1_accuracy_on_global_model,
                 'Test/all_clients_median_top1_accuracy_on_global_model': median_per_client_top1_accuracy_on_global_model,
             }, step=self.round[0])
-            logging.info(f"all_clients_mean_top1_accuracy_on_global_model: {mean_per_client_top1_accuracy_on_global_model}")
-            logging.info(f"all_clients_median_top1_accuracy_on_global_model: {median_per_client_top1_accuracy_on_global_model}")
+        logging.info(f"all_clients_mean_top1_accuracy_on_global_model: {mean_per_client_top1_accuracy_on_global_model}")
+        logging.info(f"all_clients_median_top1_accuracy_on_global_model: {median_per_client_top1_accuracy_on_global_model}")
 
-            if self.num_cluster == 0:
-                return
-            total_test_samples = 0
-            total_test_top1 = 0
-            all_per_client_top1_accuracy = []
-            for cluster_id in range(1, self.num_cluster+1):
-                total_test_samples += self.total_test_samples[cluster_id]
-                total_test_top1 += self.total_test_top1[cluster_id]
-                all_per_client_top1_accuracy += [x[1] for x in self.per_client_test_top1[cluster_id]]
-                logging.info(f"Cluster {cluster_id} has {len(self.per_client_test_top1[cluster_id])} per client test top1 from clients: {[x[0] for x in self.per_client_test_top1[cluster_id]]}")
-            mean_per_client_top1_accuracy = np.mean(all_per_client_top1_accuracy)
-            median_per_client_top1_accuracy = np.median(all_per_client_top1_accuracy)
+        if self.num_cluster == 0:
+            return
+        total_test_samples = 0
+        total_test_top1 = 0
+        all_per_client_top1_accuracy = []
+        for cluster_id in range(1, self.num_cluster+1):
+            total_test_samples += self.total_test_samples[cluster_id]
+            total_test_top1 += self.total_test_top1[cluster_id]
+            all_per_client_top1_accuracy += [x[1] for x in self.per_client_test_top1[cluster_id]]
+            logging.info(f"Cluster {cluster_id} has {len(self.per_client_test_top1[cluster_id])} per client test top1 from clients: {[x[0] for x in self.per_client_test_top1[cluster_id]]}")
+        mean_per_client_top1_accuracy = np.mean(all_per_client_top1_accuracy) if len(all_per_client_top1_accuracy) > 0 else 0.0
+        median_per_client_top1_accuracy = np.median(all_per_client_top1_accuracy) if len(all_per_client_top1_accuracy) > 0 else 0.0
+        if self.wandb != None:
             self.wandb.log({
                 'Test/all_clusters_mean_top1_accuracy': total_test_top1/max(1,total_test_samples),
                 'Test/all_clustered_clients_mean_top1_accuracy': mean_per_client_top1_accuracy,
                 'Test/all_clustered_clients_median_top1_accuracy': median_per_client_top1_accuracy,
             }, step=self.round[0])
-            logging.info(f"all_clusters_mean_top1_accuracy (avg across all samples): {total_test_top1/max(1,total_test_samples)}")
-            logging.info(f"all_clustered_clients_mean_top1_accuracy: {mean_per_client_top1_accuracy}")
-            logging.info(f"all_clustered_clients_median_top1_accuracy: {median_per_client_top1_accuracy}")
-            
-            # get the number of clients only in cluster 0 and not in other clusters
-            total_unclustered_clients = self.cluster_clients_to_test[0]
-            for cluster_id in range(1, self.num_cluster+1):
-                total_unclustered_clients = set(total_unclustered_clients) - \
-                    set(self.cluster_clients_to_test[cluster_id])
-            unclustered_client_top1_accuracy = []
-            clustered_client_top1_on_global_model = []
-            for client_top1 in self.per_client_test_top1[0]:
-                if client_top1[0] in total_unclustered_clients:
-                    all_per_client_top1_accuracy.append(client_top1[1])
-                    unclustered_client_top1_accuracy.append(client_top1[1])
-                else:
-                    clustered_client_top1_on_global_model.append(client_top1[1])
-            if len(all_per_client_top1_accuracy) != len(self.cluster_clients_to_test[0]):
-                logging.info(f"WARNING: all_per_client_top1_accuracy has length {len(all_per_client_top1_accuracy)}, expected: {len(self.cluster_clients_to_test[0])}")
-            logging.info(f"clustered_client_top1_on_global_model: {np.mean(clustered_client_top1_on_global_model)}")
-            if len(unclustered_client_top1_accuracy) == 0:
-                mean_per_unclustered_client_top1_accuracy = 0
-                median_per_unclustered_client_top1_accuracy = 0
+        logging.info(f"all_clusters_mean_top1_accuracy (avg across all samples): {total_test_top1/max(1,total_test_samples)}")
+        logging.info(f"all_clustered_clients_mean_top1_accuracy: {mean_per_client_top1_accuracy}")
+        logging.info(f"all_clustered_clients_median_top1_accuracy: {median_per_client_top1_accuracy}")
+        
+        # get the number of clients only in cluster 0 and not in other clusters
+        total_unclustered_clients = self.cluster_clients_to_test[0]
+        for cluster_id in range(1, self.num_cluster+1):
+            total_unclustered_clients = set(total_unclustered_clients) - \
+                set(self.cluster_clients_to_test[cluster_id])
+        unclustered_client_top1_accuracy = []
+        clustered_client_top1_on_global_model = []
+        for client_top1 in self.per_client_test_top1[0]:
+            if client_top1[0] in total_unclustered_clients:
+                all_per_client_top1_accuracy.append(client_top1[1])
+                unclustered_client_top1_accuracy.append(client_top1[1])
             else:
-                mean_per_unclustered_client_top1_accuracy = np.mean(unclustered_client_top1_accuracy)
-                median_per_unclustered_client_top1_accuracy = np.median(unclustered_client_top1_accuracy)
+                clustered_client_top1_on_global_model.append(client_top1[1])
+        if len(all_per_client_top1_accuracy) != len(self.cluster_clients_to_test[0]):
+            logging.info(f"WARNING: all_per_client_top1_accuracy has length {len(all_per_client_top1_accuracy)}, expected: {len(self.cluster_clients_to_test[0])}")
+        clustered_mean_on_global = np.mean(clustered_client_top1_on_global_model) if len(clustered_client_top1_on_global_model) > 0 else 0.0
+        logging.info(f"clustered_client_top1_on_global_model: {clustered_mean_on_global}")
+        if len(unclustered_client_top1_accuracy) == 0:
+            mean_per_unclustered_client_top1_accuracy = 0.0
+            median_per_unclustered_client_top1_accuracy = 0.0
+        else:
+            mean_per_unclustered_client_top1_accuracy = np.mean(unclustered_client_top1_accuracy)
+            median_per_unclustered_client_top1_accuracy = np.median(unclustered_client_top1_accuracy)
+        if self.wandb != None:
             self.wandb.log({
                 'Test/all_unclustered_clients_mean_top1_accuracy': mean_per_unclustered_client_top1_accuracy,
                 'Test/all_unclustered_clients_median_top1_accuracy': median_per_unclustered_client_top1_accuracy,
             }, step=self.round[0])
-            
-            mean_per_client_top1_accuracy = np.mean(all_per_client_top1_accuracy)
-            median_per_client_top1_accuracy = np.median(all_per_client_top1_accuracy)
+        
+        mean_per_client_top1_accuracy = np.mean(all_per_client_top1_accuracy) if len(all_per_client_top1_accuracy) > 0 else 0.0
+        median_per_client_top1_accuracy = np.median(all_per_client_top1_accuracy) if len(all_per_client_top1_accuracy) > 0 else 0.0
+        if self.wandb != None:
             self.wandb.log({
                 'Test/all_clients_mean_top1_accuracy': mean_per_client_top1_accuracy,
                 'Test/all_clients_median_top1_accuracy': median_per_client_top1_accuracy,
             }, step=self.round[0])
-            logging.info(f"all_clients_mean_top1_accuracy: {mean_per_client_top1_accuracy}")
-            logging.info(f"all_clients_median_top1_accuracy: {median_per_client_top1_accuracy}")
-            
-    
+        logging.info(f"all_clients_mean_top1_accuracy: {mean_per_client_top1_accuracy}")
+        logging.info(f"all_clients_median_top1_accuracy: {median_per_client_top1_accuracy}")
+
     def log_test_result_wandb(self, cluster_id=0):
         """Log testing result on WanDB
         """
