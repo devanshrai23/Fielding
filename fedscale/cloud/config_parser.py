@@ -10,6 +10,7 @@ parser.add_argument('--wandb_token', type=str, default="",
                     help="API key for wandb as login credentials")
 
 parser.add_argument('--model_impact_aware_reclustering', type=bool, default=False, help='Whether to check model impact before reclustering')
+parser.add_argument('--max_impact_deferrals', type=int, default=10, help='Maximum fresh harmful evaluation decisions before bypassing temporal novelty')
 parser.add_argument('--model_impact_threshold', type=float, default=0.05, help='Threshold for model impact before reclustering')
 parser.add_argument('--model_impact_smoothing', type=bool, default=False, help='Whether to use smoothing for model impact')
 parser.add_argument('--model_impact_smoothing_window', type=int, default=3, help='Window size for model impact smoothing')

@@ -59,7 +59,7 @@ job_conf:
     - test_bsz: 64
     - model_impact_aware_reclustering: True
     - model_impact_threshold: 0.05
-    - model_impact_smoothing: False
+    - model_impact_smoothing: True
     - cuda_device: cuda:0
     - save_checkpoint: True
     - sample_mode: random

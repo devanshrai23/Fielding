@@ -15,6 +15,7 @@ class MockArgs:
 class MockMetadata:
     def __init__(self):
         self.top1_accuracies = [0.8, 0.7]
+        self.evaluation_accuracies = [(0, 0.8), (1, 0.7)]
 
 class MockClientManager:
     def __init__(self):

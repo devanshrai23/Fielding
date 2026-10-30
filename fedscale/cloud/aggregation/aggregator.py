@@ -1112,7 +1112,6 @@ clients_epsilon_active: {self.client_manager.temporal_active_clients}
 
         elif self.use_gradient_cluster and cluster_id == 0 and self.client_manager.hasDriftedClients():
             if not self.client_manager._check_model_impact():
-                self.client_manager.data_drifted_clients = {}
                 self.broadcast_aggregator_events(commons.encode_clusterid(commons.START_ROUND, cluster_id))
                 return
             self.init_cluster_tasks(cluster_id, get_global_gradient=True)
@@ -1313,6 +1312,17 @@ clients_epsilon_active: {self.client_manager.temporal_active_clients}
             return False
         self.test_reported[cluster_id].append(client_id)
         per_client_record = results['per_client_record']
+        # Use the assigned cluster's evaluation, excluding duplicate global-model
+        # measurements once clustered models exist.
+        if cluster_id != 0 or self.num_cluster == 0:
+            for evaluated_client, accuracy in per_client_record:
+                metadata = self.client_manager.getClient(evaluated_client)
+                history = getattr(metadata, 'evaluation_accuracies', [])
+                evaluation_round = self.round[cluster_id]
+                history = [(r, a) for r, a in history if r != evaluation_round]
+                history.append((evaluation_round, float(accuracy)))
+                metadata.evaluation_accuracies = sorted(history)[-max(2, 2 * self.args.model_impact_smoothing_window):]
+
         results = results['results']
 
         # List append is thread-safe

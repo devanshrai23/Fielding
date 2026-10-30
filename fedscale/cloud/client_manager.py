@@ -1146,6 +1146,14 @@ class ClientManager:
             self.reclusterings_triggered = 0
             self.reclusterings_skipped_due_to_low_model_impact = 0
 
+        # Evaluate once per fresh measurement set; repeated orchestration calls
+        # must not advance histories or inflate decision counters.
+        signature = tuple(sorted((c, tuple(getattr(self.client_metadata[self.getUniqueId(0, c)],
+                                                   'evaluation_accuracies', [])))
+                                 for c in self.getDriftedClients()))
+        if signature == getattr(self, '_impact_signature', None):
+            return getattr(self, '_impact_cached_decision', True)
+        self._impact_signature = signature
         self.total_data_drift_events += 1
         self.model_impact_checks += 1
 
@@ -1163,7 +1171,7 @@ class ClientManager:
 
         for client_id in drifted_clients:
             metadata = self.client_metadata[self.getUniqueId(0, client_id)]
-            accuracies = metadata.top1_accuracies
+            accuracies = [v for _, v in getattr(metadata, 'evaluation_accuracies', [])]
             
             # 1. Compute raw impact (if possible)
             client_raw = None
@@ -1209,6 +1217,7 @@ class ClientManager:
                 self.smoothed_recluster_decisions += 1
                 
             logging.info(f"MODEL_IMPACT_CHECK: cluster_id={cluster_id_str} drifted_clients={len(drifted_clients)} valid_accuracy_clients=0 raw_avg_model_impact=N/A smoothed_avg_model_impact=N/A raw_max_model_impact=N/A smoothed_max_model_impact=N/A threshold={threshold} smoothing_enabled={smoothing_enabled} smoothing_window={W if smoothing_enabled else 'N/A'} history_ready=False final_recluster_decision=FALLBACK_ORIGINAL_NO_MODEL_IMPACT_DATA")
+            self._impact_cached_decision = True
             return True
 
         if smoothing_enabled and insufficient_history_count > 0:
@@ -1263,7 +1272,7 @@ class ClientManager:
             self.temporal_reclusterings_avoided = 0
             self.all_deltas = []
             self.all_epsilons = []
-        self.temporal_eval_count += 1
+        self.temporal_eval_count = max((r for c in drifted_clients for r, _ in getattr(self.client_metadata[self.getUniqueId(0, c)], 'evaluation_accuracies', [])), default=self.temporal_eval_count)
         
         global_temporal_significant = True
         
@@ -1271,6 +1280,12 @@ class ClientManager:
             temporal_sigs = []
             for client_id in drifted_clients:
                 metadata = self.client_metadata[self.getUniqueId(0, client_id)]
+                observations = getattr(metadata, 'evaluation_accuracies', [])
+                observation_key = tuple(observations)
+                if observation_key == getattr(metadata, '_temporal_observation_key', None):
+                    temporal_sigs.append(getattr(metadata, '_temporal_last_decision', True))
+                    continue
+                metadata._temporal_observation_key = observation_key
                 if not hasattr(metadata, 'delta_history'):
                     metadata.delta_history = []
                     metadata.last_M = 0.0
@@ -1278,7 +1293,8 @@ class ClientManager:
                     metadata.drift_eval_history = []
                     metadata.epsilon_active = False
 
-                metadata.drift_eval_history.append(self.temporal_eval_count)
+                if self.temporal_eval_count not in metadata.drift_eval_history:
+                    metadata.drift_eval_history.append(self.temporal_eval_count)
                 PW = getattr(self.args, 'persistence_window', 5)
                 metadata.drift_eval_history = [e for e in metadata.drift_eval_history if e > self.temporal_eval_count - PW]
                 P_t = len(metadata.drift_eval_history) / float(PW)
@@ -1343,15 +1359,23 @@ class ClientManager:
                 if len(metadata.delta_history) > EW:
                     metadata.delta_history.pop(0)
                     
+                metadata._temporal_last_decision = client_temporal_significant
                 temporal_sigs.append(client_temporal_significant)
                 
             global_temporal_significant = any(temporal_sigs)
 
+        # A persistent performance problem must eventually escape the novelty
+        # filter. Count fresh measurement decisions, never repeated calls.
+        self._harmful_deferrals = (getattr(self, '_harmful_deferrals', 0) + 1
+                                  if is_significant else 0)
+        if self._harmful_deferrals >= getattr(self.args, 'max_impact_deferrals', 10):
+            global_temporal_significant = True
         final_recluster = is_significant
         if temporal_enabled:
             final_recluster = is_significant and global_temporal_significant
 
         if final_recluster:
+            self._harmful_deferrals = 0
             self.model_impact_significant_events += 1
             self.reclusterings_triggered += 1
             decision = "RECLUSTER_SMOOTHED" if (smoothing_enabled and insufficient_history_count == 0) else ("RECLUSTER_RAW" if not smoothing_enabled else "RECLUSTER_PARTIAL_SMOOTHED")
@@ -1359,14 +1383,14 @@ class ClientManager:
                 decision += "_AND_TEMPORAL_SIG"
         else:
             self.model_impact_insignificant_events += 1
-            self.reclusterings_skipped_due_to_low_model_impact += 1
+            if not is_significant:
+                self.reclusterings_skipped_due_to_low_model_impact += 1
             
             if temporal_enabled and is_significant and not global_temporal_significant:
                 decision = "SKIP_TEMPORAL_EPSILON"
                 self.temporal_reclusterings_avoided += 1
             else:
                 decision = "SKIP_SMOOTHED" if (smoothing_enabled and insufficient_history_count == 0) else ("SKIP_RAW" if not smoothing_enabled else "SKIP_PARTIAL_SMOOTHED")
-            self.data_drifted_clients = {}
 
         history_ready = (insufficient_history_count == 0) if smoothing_enabled else "N/A"
 
@@ -1385,6 +1409,7 @@ class ClientManager:
             f"final_recluster_decision={decision}"
         )
 
+        self._impact_cached_decision = final_recluster
         return final_recluster
 
     def clientReclusterAllGradientBased(self, device, clusters=[0], use_global_model=False, curr_round=0, default_global_recluster=False):
@@ -1395,8 +1420,7 @@ class ClientManager:
             return {}
 
         if not self._check_model_impact():
-            logging.info("model impact insignificant, skip reclustering")
-            self.data_drifted_clients = {}
+            logging.info("model impact insignificant, retain pending drift")
             return {}
 
         prev_cluster_to_center = copy.deepcopy(self.cluster_to_center)
@@ -1457,8 +1481,7 @@ class ClientManager:
             return {}
 
         if not self._check_model_impact():
-            logging.info("model impact insignificant, skip reclustering")
-            self.data_drifted_clients = {}
+            logging.info("model impact insignificant, retain pending drift")
             return {}
 
         prev_cluster_to_center = copy.deepcopy(self.cluster_to_center)
@@ -1527,7 +1550,6 @@ class ClientManager:
 
         if not self._check_model_impact():
             logging.info("model impact insignificant, skip reclustering")
-            self.data_drifted_clients = {}
             return {}, False
         prev_cluster_to_center = copy.deepcopy(self.cluster_to_center)
         logging.info(f"prev_cluster_to_center: {prev_cluster_to_center}")
@@ -1583,6 +1605,8 @@ class ClientManager:
                     prev_cluster_to_center, shifted_cluster, self.cluster_to_center, self.current_clusters)
 
         if global_recluster:
+            self.actual_global_reclusterings = getattr(self, "actual_global_reclusterings", 0) + 1
+            logging.info("ACTUAL_GLOBAL_RECLUSTER count=%s round=%s", self.actual_global_reclusterings, round)
             _, distribution_prob = self.global_clustering(curr_round=round)
             # find the closest previous cluster for each new cluster
             for new_cluster in self.current_clusters:

@@ -8,6 +8,7 @@
 class MockMetadata:
     def __init__(self, top1):
         self.top1_accuracies = top1
+        self.evaluation_accuracies = list(enumerate(top1))
 
 class MockClientManager:
     def __init__(self, clients_data):
