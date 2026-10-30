@@ -988,6 +988,51 @@ class ClientManager:
                 has_empty_cluster = True
         return has_empty_cluster
 
+    def _prepare_active_distributions(self):
+        """Validate all active members before mutating clustering state.
+
+        Zero-sample clients become inactive; malformed counts fail explicitly.
+        Pending drift is retained only for active clients and their current cluster.
+        """
+        candidates = set(c for members in self.feasibleClients for c in members)
+        distributions = {}
+        inactive = set()
+        width = None
+        for client_id in sorted(candidates):
+            metadata = self.client_metadata[self.getUniqueId(0, client_id)]
+            counts = np.asarray(metadata.label_distribution, dtype=float)
+            if (counts.ndim != 1 or counts.size == 0 or
+                    not np.isfinite(counts).all() or (counts < 0).any()):
+                raise ValueError(f"Invalid label counts for client {client_id}")
+            total = float(counts.sum())
+            if not math.isfinite(total):
+                raise ValueError(f"Invalid label total for client {client_id}")
+            if total == 0:
+                inactive.add(client_id)
+                continue
+            if width is None:
+                width = counts.size
+            elif counts.size != width:
+                raise ValueError(f"Inconsistent label vector size for client {client_id}")
+            distributions[client_id] = (counts / total).tolist()
+
+        pending = self.getDriftedClients()
+        for members in self.feasibleClients:
+            members[:] = list(dict.fromkeys(c for c in members if c not in inactive))
+        # Keep the global membership consistent with all surviving cluster members.
+        self.feasibleClients[0][:] = sorted(distributions)
+        self.not_yet_feasibleClients = sorted(
+            (set(self.not_yet_feasibleClients) | inactive) - set(distributions))
+        self.data_drifted_clients = {}
+        for client_id in sorted(pending & set(distributions)):
+            cluster_id = next((k for k in self.current_clusters
+                               if client_id in self.feasibleClients[k]), 0)
+            self.register_data_drifted_client(client_id, cluster_id)
+        if inactive:
+            logging.info("Removed zero-sample clients from clusters and pending drift: %s",
+                         sorted(inactive))
+        return distributions
+
     def global_client_update_label_counts(self, round):
         total_clients = 0
         drift_clients = 0
@@ -1042,6 +1087,7 @@ class ClientManager:
                         self.register_data_drifted_client(client_id, cluster_id)
                         logging.info(f"client {client_id} of cluster {cluster_id} drifted")
                         drift_clients += 1
+        self._prepare_active_distributions()
         logging.info(f"round {round} total clients {total_clients}, drifted clients {drift_clients}")
 
     def clientRecluster(self, cluster_id=0, use_distribution=True, force_incremental=False):
@@ -1415,6 +1461,7 @@ class ClientManager:
     def clientReclusterAllGradientBased(self, device, clusters=[0], use_global_model=False, curr_round=0, default_global_recluster=False):
         logging.info(f"reclustering clusters using gradient {clusters}")
 
+        self._prepare_active_distributions()
         if not self.hasDriftedClients():
             logging.info("no clients drifted, skip reclustering")
             return {}
@@ -1476,6 +1523,7 @@ class ClientManager:
     def clientReclusterAllRepresentationBased(self, device, clusters=[0], use_global_model=False, curr_round=0, default_global_recluster=False):
         logging.info(f"reclustering clusters using representation {clusters}")
 
+        self._prepare_active_distributions()
         if not self.hasDriftedClients():
             logging.info("no clients drifted, skip reclustering")
             return {}
@@ -1542,13 +1590,19 @@ class ClientManager:
             # and trigger global reclustering if any cluster becomes empty
             default_global_recluster = self.verify_unfeasible_clients(round=round) \
                 or default_global_recluster
+        distribution_prob = self._prepare_active_distributions()
+        if not distribution_prob:
+            return {}, False
+        # Empty clusters need structural repair regardless of impact gating.
+        default_global_recluster = default_global_recluster or any(
+            not self.feasibleClients[k] for k in self.current_clusters)
         # if no clients drifted, skip
-        if not self.hasDriftedClients():
+        if not self.hasDriftedClients() and not default_global_recluster:
             logging.info(f"no clients drifted, skip reclustering")
             return {}, False
         
 
-        if not self._check_model_impact():
+        if not default_global_recluster and not self._check_model_impact():
             logging.info("model impact insignificant, skip reclustering")
             return {}, False
         prev_cluster_to_center = copy.deepcopy(self.cluster_to_center)
@@ -1557,7 +1611,6 @@ class ClientManager:
         empty_cluster = set()
         model_mapping = {}
         global_recluster = False
-        distribution_prob = {}
         if not default_global_recluster:
             try:
                 # update the cluster centers after client drifting
@@ -1578,8 +1631,9 @@ class ClientManager:
                             self.clientRecluster(cluster_id=cluster_id,
                                                 use_distribution=use_distribution,
                                                 force_incremental=force_incremental))
-            except Exception as ex:
-                logging.info(f"error in clientReclusterAll: {ex}")
+            except Exception:
+                logging.exception("Aborting clientReclusterAll after clustering failure")
+                raise
             # recalculate the centers of clusters
             for cluster in shifted_cluster:
                 if len(self.feasibleClients[cluster]) == 0:

@@ -170,15 +170,31 @@ class ClusterManager:
     
     def check_intra_heterogeneity_for_cluster_deletion(self, new_clusters, distribution_prob, client_metadata,
                                                        feasibleClients):
-        # get the distribution center of the global model and each new cluster
+        # Rebuild a complete validated map before computing any cluster statistics.
         cluster_centers = {}
         try:
-            # add missing distribution_prob for clients in new_clusters if needed
-            for client_id in feasibleClients[0]:
-                if client_id not in distribution_prob:
-                    client_label_counts = client_metadata[self.getUniqueId(0, client_id)].label_distribution
-                    distribution_prob[client_id] = [x/sum(client_label_counts) for x in client_label_counts]
-                    logging.info(f"NOTE: client {client_id} added distribution: {distribution_prob[client_id]} in check_intra_heterogeneity_for_cluster_deletion")
+            active = set(feasibleClients[0])
+            members = {c for cluster in new_clusters.values() for c in cluster}
+            if not members.issubset(active):
+                raise ValueError(f"Cluster members missing from active clients: {sorted(members - active)}")
+            validated = {}
+            width = None
+            for client_id in sorted(active):
+                counts = np.asarray(client_metadata[self.getUniqueId(0, client_id)].label_distribution,
+                                    dtype=float)
+                if (counts.ndim != 1 or counts.size == 0 or
+                        not np.isfinite(counts).all() or (counts < 0).any() or
+                        not np.isfinite(counts.sum()) or counts.sum() <= 0):
+                    raise ValueError(f"Invalid active distribution for client {client_id}")
+                if width is not None and counts.size != width:
+                    raise ValueError(f"Inconsistent label vector size for client {client_id}")
+                width = counts.size
+                validated[client_id] = (counts / counts.sum()).tolist()
+            distribution_prob = validated
+            if not active or not new_clusters:
+                return [], {}
+            if any(not cluster for cluster in new_clusters.values()):
+                raise ValueError("Empty cluster requires structural repair before heterogeneity checks")
             # calculate cluster centers
             for cluster_id, cluster in new_clusters.items():
                 logging.info(f"cluster {cluster_id} has {len(cluster)} clients")
@@ -201,7 +217,8 @@ class ClusterManager:
                     client_j = sorted_clients[j]
                     pairwise_distance[(client_i, client_j)] = \
                             np.linalg.norm(np.array(distribution_prob[client_i]) - np.array(distribution_prob[client_j]), ord=1)
-            global_avg_distance = sum(pairwise_distance.values()) / len(pairwise_distance)
+            global_avg_distance = (sum(pairwise_distance.values()) / len(pairwise_distance)
+                                   if pairwise_distance else 0.0)
             # for each cluster, calculate the avg wdistance between each pair of its clients
             for cluster_id, cluster in new_clusters.items():
                 cluster_avg_distance = 0
@@ -225,7 +242,8 @@ class ClusterManager:
                                                         pairwise_distance=pairwise_distance)
 
         except Exception as e:
-            logging.info(f"error in check_intra_heterogeneity_for_cluster_deletion: {e}")
+            logging.exception("Aborting heterogeneity check after invalid clustering state")
+            raise
             
         return cluster_to_remove, rebalanced_clusters
     
